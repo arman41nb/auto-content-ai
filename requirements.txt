@@ -1,0 +1,13 @@
+requests
+python-dotenv
+pydantic
+Pillow
+
+# Optional: enables voiceover generation if the edge-tts CLI is installed.
+# edge-tts
+#
+# Optional: enables OCR-based accidental text detection if Tesseract is installed.
+# pytesseract
+#
+# Optional fallback TTS library; not required by the current CLI.
+# pyttsx3

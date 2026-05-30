@@ -1,0 +1,2 @@
+"""Carousel rendering utilities."""
+

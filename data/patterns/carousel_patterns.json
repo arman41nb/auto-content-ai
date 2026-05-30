@@ -1,0 +1,163 @@
+[
+  {
+    "name": "Expectation vs Reality",
+    "works_for": ["history", "science", "future"],
+    "description": "Start with what people assume, then reveal the harsher or stranger reality.",
+    "best_for": ["history daily life", "science facts", "future scenarios"],
+    "slide_structure": [
+      "Familiar belief or cinematic expectation",
+      "Contradiction",
+      "Concrete detail",
+      "Vivid contrast",
+      "Question or save CTA"
+    ],
+    "example_hooks": [
+      "Ancient Rome was not what movies showed you.",
+      "Space is not empty. It is violent.",
+      "The future looks clean. It may not feel simple."
+    ],
+    "avoid": [
+      "abstract poetic hooks",
+      "generic school-style titles",
+      "unrelated topic fragments"
+    ]
+  },
+  {
+    "name": "POV Survival",
+    "works_for": ["history", "science", "future"],
+    "description": "Put the viewer inside the world and make each slide reveal what they would face next.",
+    "best_for": ["daily life", "hostile places", "future worlds"],
+    "slide_structure": [
+      "You arrive in the world",
+      "First sensory shock",
+      "Specific survival problem",
+      "Unexpected rule or tradeoff",
+      "Would you survive CTA"
+    ],
+    "example_hooks": [
+      "You wake up in Rome. Bad idea.",
+      "You landed on the wrong planet.",
+      "Your future apartment knows too much."
+    ],
+    "avoid": [
+      "distant textbook narration",
+      "elite-only scenes",
+      "vague danger"
+    ]
+  },
+  {
+    "name": "Strange Detail",
+    "works_for": ["history", "science", "future"],
+    "description": "Use one vivid detail as the thread, then reveal why it matters.",
+    "best_for": ["surprising facts", "visual details", "sensory history"],
+    "slide_structure": [
+      "One strange detail",
+      "Why it existed",
+      "What it changed",
+      "The bigger reality",
+      "Save or comment CTA"
+    ],
+    "example_hooks": [
+      "Rome's streets would hit your nose first.",
+      "This planet may rain sideways.",
+      "One tiny upgrade could change childhood."
+    ],
+    "avoid": [
+      "broad topic summaries",
+      "too many facts at once",
+      "unsourced exact numbers"
+    ]
+  },
+  {
+    "name": "What If Scenario",
+    "works_for": ["science", "future"],
+    "description": "Frame a speculative question, then follow consequences step by step.",
+    "best_for": ["future scenarios", "space hypotheticals", "AI futures"],
+    "slide_structure": [
+      "Clear what-if question",
+      "Immediate consequence",
+      "Human impact",
+      "Hidden tradeoff",
+      "Comment CTA"
+    ],
+    "example_hooks": [
+      "What if Earth had two moons?",
+      "What if school had AI teachers?",
+      "What if Mars became affordable?"
+    ],
+    "avoid": [
+      "certainty about fictional outcomes",
+      "unexplained technology",
+      "doom without logic"
+    ]
+  },
+  {
+    "name": "Myth vs Truth",
+    "works_for": ["history", "science"],
+    "description": "Open with a common misconception, then replace it with a sharper grounded reality.",
+    "best_for": ["myths", "school misconceptions", "movie inaccuracies"],
+    "slide_structure": [
+      "The myth people believe",
+      "The correction",
+      "Concrete evidence or example",
+      "Why the myth survived",
+      "Save CTA"
+    ],
+    "example_hooks": [
+      "Romans did not all live like Caesar.",
+      "Black holes are not cosmic vacuum cleaners.",
+      "Gladiator movies skipped the smell."
+    ],
+    "avoid": [
+      "mocking the audience",
+      "overcorrecting into another myth",
+      "unsupported debunk claims"
+    ]
+  },
+  {
+    "name": "Hidden Cost",
+    "works_for": ["history", "science", "future"],
+    "description": "Show the attractive surface, then reveal the price paid underneath.",
+    "best_for": ["empires", "technology tradeoffs", "future convenience"],
+    "slide_structure": [
+      "Beautiful surface",
+      "Who pays the cost",
+      "Daily consequence",
+      "Moral or practical contrast",
+      "Question CTA"
+    ],
+    "example_hooks": [
+      "Rome's marble had a street-level cost.",
+      "A perfect future may need ugly tradeoffs.",
+      "Space travel has a brutal bill."
+    ],
+    "avoid": [
+      "abstract darkness",
+      "villain-only framing",
+      "claims too broad to support"
+    ]
+  },
+  {
+    "name": "Timeline Compression",
+    "works_for": ["history", "science", "future"],
+    "description": "Compress a long process into a fast sequence of vivid turning points.",
+    "best_for": ["civilizations", "cosmic scale", "technology change"],
+    "slide_structure": [
+      "Start with the final shocking scale",
+      "Step back to the beginning",
+      "Fast turning point",
+      "Strange consequence",
+      "Follow or save CTA"
+    ],
+    "example_hooks": [
+      "Rome's daily life ran on old problems.",
+      "A star's death can become a city-sized monster.",
+      "The next century could arrive unevenly."
+    ],
+    "avoid": [
+      "timeline overload",
+      "date-heavy slides",
+      "weak final payoff"
+    ]
+  }
+]
