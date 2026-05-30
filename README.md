@@ -13,7 +13,9 @@ Manual review is required before posting. The project does not auto-publish to I
 - LLM fallback across configured providers.
 - Pollinations image generation with multiple image variants.
 - Carousel rendering with Pillow.
-- Reel export with FFmpeg.
+- Native `native_reel_story` output for 1080x1920, five-scene cinematic Reels.
+- Reel export with FFmpeg or the bundled `imageio-ffmpeg` fallback.
+- Optional `edge-tts` voiceover generation and audio muxing.
 - Quality gate reports for generated post packages.
 - Recovery flags for render-only and resume workflows.
 
@@ -39,15 +41,16 @@ Required environment keys are all optional at runtime:
 
 The app skips missing LLM providers in `auto` mode. Discovery can also use `NASA_API_KEY`; if it is empty, the NASA source falls back to public demo access where supported.
 
-## FFmpeg
+## FFmpeg and Voiceover
 
-Reel MP4 export requires FFmpeg on `PATH`:
+Reel MP4 export uses FFmpeg on `PATH` when available:
 
 ```bash
 ffmpeg -version
 ```
 
-If FFmpeg is unavailable, the app can still create a Reel cover image and writes a local TODO file in the generated package.
+If the system command is unavailable, the app falls back to `imageio-ffmpeg`.
+Voiceover uses `edge-tts` when installed and writes `voiceover/voiceover_script.txt` even if TTS fails.
 
 ## Example Commands
 
@@ -62,6 +65,14 @@ Run discovery, generation, carousel rendering, and Reel export:
 ```bash
 python -m app.main auto --niche science --lane any --count 1 --sources static --handle "@yourpage" --image-variants 3 --rate-limit 25 --llm-provider auto --make-reel
 ```
+
+Generate the deterministic native Reel benchmark:
+
+```bash
+python -m app.main auto --niche science --lane any --count 1 --sources static --handle "@yourpage" --image-variants 3 --rate-limit 25 --llm-provider auto --make-reel --template native_reel_story --voiceover
+```
+
+Native Reel outputs include `final_reel/reel.mp4`, `final_reel/cover.jpg`, `final_reel/frames/frame_01.jpg` through `frame_05.jpg`, `reel_plan.json`, and voiceover assets when requested.
 
 Re-render an existing package without calling an LLM or image provider:
 
@@ -98,7 +109,8 @@ Core Python dependencies are listed in `requirements.txt`:
 
 Optional tools and libraries:
 
-- `edge-tts` optional for voiceover generation when the CLI is installed.
+- `edge-tts` for optional voiceover generation.
+- `imageio-ffmpeg` for local FFmpeg fallback.
 - `pytesseract` optional for OCR-based accidental text detection when Tesseract is installed locally.
 - `pyttsx3` is not required by the current CLI.
 

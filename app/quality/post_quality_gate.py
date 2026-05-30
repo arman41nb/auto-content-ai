@@ -113,6 +113,27 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         blocking.append("Reel video was requested but final_reel/reel.mp4 was not created.")
         score -= 20
 
+    native_reel_quality = metadata.get("native_reel_quality", {})
+    if isinstance(native_reel_quality, dict):
+        native_reel_score = int(native_reel_quality.get("native_reel_score", 0) or 0)
+        first_second_hook_score = int(native_reel_quality.get("first_second_hook_score", 0) or 0)
+        scene_variety_score = int(native_reel_quality.get("scene_variety_score", 0) or 0)
+        ai_slideshow_risk_score = int(native_reel_quality.get("ai_slideshow_risk_score", 100))
+        if native_reel_score < 75:
+            blocking.append(f"Native Reel score is below publish threshold: {native_reel_score}.")
+            score -= 18
+        if first_second_hook_score < 75:
+            blocking.append(f"First-second hook score is below publish threshold: {first_second_hook_score}.")
+            score -= 12
+        if scene_variety_score < 70:
+            blocking.append(f"Scene variety score is below publish threshold: {scene_variety_score}.")
+            score -= 12
+        if ai_slideshow_risk_score > 60:
+            blocking.append(f"AI slideshow risk is too high: {ai_slideshow_risk_score}.")
+            score -= 16
+        for issue in _string_list(native_reel_quality.get("blocking_issues", [])):
+            blocking.append(issue)
+
     design = _design_quality_report(output_dir, existing_final, metadata)
     warnings.extend(design["amateur_template_warnings"])
     if design["design_score"] < 70:
@@ -142,6 +163,22 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
             "rendered_overlay_ignored_regions": metadata.get("rendered_overlay_ignored_regions", {}),
             "intentional_overlay_text_present": bool(metadata.get("intentional_overlay_text_present", False)),
             "publish_blocking_image_warnings": publish_blocking_image_warnings,
+            "native_reel_quality": native_reel_quality if isinstance(native_reel_quality, dict) else {},
+            "native_reel_score": native_reel_quality.get("native_reel_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "first_second_hook_score": native_reel_quality.get("first_second_hook_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "scene_variety_score": native_reel_quality.get("scene_variety_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "ai_slideshow_risk_score": native_reel_quality.get("ai_slideshow_risk_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "cover_quality_score": native_reel_quality.get("cover_quality_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
             **design,
         },
     )
@@ -163,6 +200,11 @@ def write_post_quality_report(output_dir: Path, report: PostQualityReport) -> No
         f"- reel_design_score: {report.details.get('reel_design_score', 0)}",
         f"- carousel_design_score: {report.details.get('carousel_design_score', 0)}",
         f"- visual_variety_score: {report.details.get('visual_variety_score', 0)}",
+        f"- native_reel_score: {report.details.get('native_reel_score', 0)}",
+        f"- first_second_hook_score: {report.details.get('first_second_hook_score', 0)}",
+        f"- scene_variety_score: {report.details.get('scene_variety_score', 0)}",
+        f"- ai_slideshow_risk_score: {report.details.get('ai_slideshow_risk_score', 0)}",
+        f"- cover_quality_score: {report.details.get('cover_quality_score', 0)}",
         f"- recommended_action: {report.recommended_action}",
         f"- artifact_detection_scope: {report.details.get('artifact_detection_scope', 'raw')}",
         "",

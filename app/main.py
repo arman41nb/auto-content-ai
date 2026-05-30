@@ -16,6 +16,7 @@ from PIL import Image
 
 from app.config import load_config
 from app.content.planner import CarouselPlanner
+from app.content.reel_schemas import ReelPlan, deterministic_ocean_reel_plan, reel_plan_to_carousel_plan
 from app.content.schemas import CarouselPlan
 from app.discovery.discovery_pipeline import DiscoveryPipeline, write_discovery_reports
 from app.discovery.schemas import TopicCandidate
@@ -25,9 +26,11 @@ from app.image.quality import score_candidate, select_best_candidate, selection_
 from app.image.sanitizer import preferred_image_dir, sanitize_post_images
 from app.llm.provider_factory import build_llm_providers
 from app.quality.contact_sheet import create_qa_contact_sheet
+from app.quality.native_reel_quality import run_native_reel_quality_gate
 from app.quality.overlay_masks import get_expected_overlay_regions
 from app.quality.post_quality_gate import PostQualityReport, run_post_quality_gate
 from app.render.carousel_renderer import CarouselRenderer
+from app.render.native_reel_renderer import export_native_reel_story, get_ffmpeg_path
 from app.render.reel_exporter import export_reel_package
 from app.research.research_pack_loader import load_research_pack
 from app.storage.post_exporter import PostExporter
@@ -90,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create final_reel/cover.jpg and final_reel/reel.mp4 from generated images when FFmpeg is available.",
     )
+    add_voiceover_arguments(generate)
     generate.add_argument(
         "--plan-file",
         default=None,
@@ -203,10 +207,40 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create final_reel/cover.jpg and final_reel/reel.mp4 from generated images when FFmpeg is available.",
     )
+    add_voiceover_arguments(auto)
     return parser
 
 
+def add_voiceover_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--voiceover",
+        action="store_true",
+        help="Create voiceover/voiceover_script.txt and optional TTS audio for Reel output.",
+    )
+    parser.add_argument(
+        "--tts-provider",
+        choices=["auto", "edge", "none"],
+        default="auto",
+        help="Voiceover TTS provider. Use none to write only the script.",
+    )
+    parser.add_argument(
+        "--voice",
+        default="en-US-GuyNeural",
+        help="edge-tts voice name.",
+    )
+    parser.add_argument(
+        "--voice-rate",
+        default="-5%",
+        help="edge-tts speaking rate, e.g. -5%% or +0%%.",
+    )
+
+
 def generate(args: argparse.Namespace) -> int:
+    native_reel_mode = is_native_reel_story(args)
+    if native_reel_mode and args.image_variants < 3:
+        args.image_variants = 3
+    if getattr(args, "voiceover", False) and not getattr(args, "make_reel", False):
+        args.make_reel = True
     if args.render_only and not args.output_dir:
         raise ValueError("--render-only requires --output-dir.")
     if args.resume and not args.output_dir:
@@ -227,6 +261,7 @@ def generate(args: argparse.Namespace) -> int:
     created_at = datetime.now().astimezone()
     warnings = list(config.warnings)
     planning_info = empty_planning_info()
+    reel_plan: ReelPlan | None = None
     grounding_warnings: list[str] = []
     research_pack_used = "none"
     pattern_library_used = False
@@ -236,10 +271,12 @@ def generate(args: argparse.Namespace) -> int:
         output_dir = resolve_output_dir(config.project_root, args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         plan = load_plan(output_dir / "carousel_plan.json")
+        reel_plan = load_reel_plan(output_dir / "reel_plan.json") if native_reel_mode else None
         existing_metadata = load_existing_metadata(output_dir)
         apply_plan_defaults(args, plan)
     elif args.plan_file:
         plan = load_plan(resolve_output_dir(config.project_root, args.plan_file))
+        reel_plan = deterministic_ocean_reel_plan(str(args.niche or plan.niche)) if native_reel_mode else None
         apply_plan_defaults(args, plan)
         output_dir = (
             resolve_output_dir(config.project_root, args.output_dir)
@@ -249,6 +286,22 @@ def generate(args: argparse.Namespace) -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
         exporter.save_plan(output_dir, plan)
         planning_info = empty_planning_info(provider="plan_file", model=str(resolve_output_dir(config.project_root, args.plan_file)))
+    elif native_reel_mode:
+        reel_plan = deterministic_ocean_reel_plan(str(args.niche or "science"))
+        plan = reel_plan_to_carousel_plan(reel_plan)
+        args.topic = reel_plan.topic
+        args.niche = reel_plan.niche
+        args.slides = len(reel_plan.scenes)
+        output_dir = (
+            resolve_output_dir(config.project_root, args.output_dir)
+            if args.output_dir
+            else exporter.create_output_dir(reel_plan.topic, created_at)
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Output: {output_dir}")
+        exporter.save_plan(output_dir, plan)
+        save_reel_plan(output_dir, reel_plan)
+        planning_info = empty_planning_info(provider="deterministic", model="native_reel_story/oceans_rose_overnight")
     else:
         output_dir = (
             resolve_output_dir(config.project_root, args.output_dir)
@@ -318,6 +371,7 @@ def generate(args: argparse.Namespace) -> int:
     render_template_used_per_slide: dict[str, str] = {}
     reel_export: dict[str, object] = {"requested": bool(getattr(args, "make_reel", False)), "created_video": False}
     voiceover_info: dict[str, object] = {"script_created": False, "tts_created": False}
+    native_reel_render_metadata: dict[str, object] = {}
     image_model = "none"
     resume_warnings: list[str] = []
 
@@ -341,22 +395,38 @@ def generate(args: argparse.Namespace) -> int:
         warnings.extend(renderer.warnings)
         if getattr(args, "make_reel", False):
             print("Preparing Reel package...")
-            result = export_reel_package(
-                plan=plan,
-                final_dir=final_dir,
-                raw_dir=raw_dir,
-                output_dir=output_dir,
-                handle=args.handle,
-            )
+            if native_reel_mode:
+                if reel_plan is None:
+                    reel_plan = deterministic_ocean_reel_plan(plan.niche)
+                    save_reel_plan(output_dir, reel_plan)
+                result = export_native_reel_story(
+                    reel_plan=reel_plan,
+                    image_dir=preferred_image_dir(output_dir, raw_dir),
+                    output_dir=output_dir,
+                    handle=args.handle,
+                )
+            else:
+                result = export_reel_package(
+                    plan=plan,
+                    final_dir=final_dir,
+                    raw_dir=raw_dir,
+                    output_dir=output_dir,
+                    handle=args.handle,
+                )
             warnings.extend(result.warnings)
             reel_export = reel_export_metadata(result, requested=True)
+            if native_reel_mode:
+                reel_export["template"] = "native_reel_story"
+                reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
+                native_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
             if result.created_video:
                 print(f"Reel saved at: {result.reel_path}")
             elif result.cover_path.exists():
                 print(f"Reel cover saved at: {result.cover_path}")
             else:
                 print(f"Reel package notes saved at: {result.output_dir}")
-            voiceover_info = write_voiceover_assets(plan, output_dir, result.reel_path)
+            if getattr(args, "voiceover", False):
+                voiceover_info = write_voiceover_assets(plan, output_dir, result.reel_path, args, reel_plan)
         metadata = merge_existing_metadata(
             existing_metadata,
             {
@@ -371,6 +441,7 @@ def generate(args: argparse.Namespace) -> int:
                 "render_template_used_per_slide": render_template_used_per_slide,
                 "reel_export": reel_export,
                 "voiceover": voiceover_info,
+                "native_reel_render": native_reel_render_metadata if native_reel_mode else {},
                 "warnings": sorted(set([*warnings, *existing_metadata.get("warnings", [])]))
                 if isinstance(existing_metadata.get("warnings", []), list)
                 else sorted(set(warnings)),
@@ -385,6 +456,15 @@ def generate(args: argparse.Namespace) -> int:
             render_template_used_per_slide=render_template_used_per_slide,
         )
         exporter.save_metadata(output_dir, metadata)
+        if native_reel_mode and reel_plan is not None:
+            native_reel_quality = run_native_reel_quality_gate(
+                output_dir=output_dir,
+                reel_plan=reel_plan,
+                metadata=metadata,
+                voiceover_requested=bool(getattr(args, "voiceover", False)),
+            )
+            metadata["native_reel_quality"] = native_reel_quality
+            exporter.save_metadata(output_dir, metadata)
         quality_report = run_post_quality_gate(output_dir, plan, metadata)
         contact_sheet = create_qa_contact_sheet(
             final_dir=final_dir,
@@ -392,6 +472,12 @@ def generate(args: argparse.Namespace) -> int:
             publish_ready=quality_report.publish_ready,
             score=quality_report.score,
             design_score=int(quality_report.details.get("design_score", 0) or 0),
+            native_reel_score=int(metadata.get("native_reel_quality", {}).get("native_reel_score", 0))
+            if isinstance(metadata.get("native_reel_quality", {}), dict)
+            else None,
+            ai_slideshow_risk_score=int(metadata.get("native_reel_quality", {}).get("ai_slideshow_risk_score", 0))
+            if isinstance(metadata.get("native_reel_quality", {}), dict)
+            else None,
             topic=plan.topic,
             reel_path=str(output_dir / "final_reel" / "reel.mp4") if getattr(args, "make_reel", False) else "",
             cover_path=str(output_dir / "final_reel" / "cover.jpg") if getattr(args, "make_reel", False) else "",
@@ -399,6 +485,8 @@ def generate(args: argparse.Namespace) -> int:
         metadata["qa_contact_sheet"] = str(contact_sheet)
         exporter.save_metadata(output_dir, metadata)
         quality_report = run_post_quality_gate(output_dir, plan, metadata)
+        if native_reel_mode:
+            write_native_reel_redesign_reports(output_dir, quality_report, metadata)
         print_generation_summary(output_dir, quality_report, resume_suggestion=True)
         return 0
 
@@ -406,7 +494,9 @@ def generate(args: argparse.Namespace) -> int:
         image_client = PollinationsClient(
             rate_limit_seconds=args.rate_limit
             if args.rate_limit is not None
-            else config.pollinations_rate_limit_seconds
+            else config.pollinations_rate_limit_seconds,
+            width=1080 if native_reel_mode else 1080,
+            height=1920 if native_reel_mode else 1350,
         )
         image_model = image_client.model
         failed_slide_numbers = failed_slide_numbers_from_metadata(existing_metadata) if args.resume else set()
@@ -450,15 +540,30 @@ def generate(args: argparse.Namespace) -> int:
 
     if getattr(args, "make_reel", False):
         print("Preparing Reel package...")
-        result = export_reel_package(
-            plan=plan,
-            final_dir=final_dir,
-            raw_dir=raw_dir,
-            output_dir=output_dir,
-            handle=args.handle,
-        )
+        if native_reel_mode:
+            if reel_plan is None:
+                reel_plan = deterministic_ocean_reel_plan(plan.niche)
+                save_reel_plan(output_dir, reel_plan)
+            result = export_native_reel_story(
+                reel_plan=reel_plan,
+                image_dir=preferred_image_dir(output_dir, raw_dir),
+                output_dir=output_dir,
+                handle=args.handle,
+            )
+        else:
+            result = export_reel_package(
+                plan=plan,
+                final_dir=final_dir,
+                raw_dir=raw_dir,
+                output_dir=output_dir,
+                handle=args.handle,
+            )
         warnings.extend(result.warnings)
         reel_export = reel_export_metadata(result, requested=True)
+        if native_reel_mode:
+            reel_export["template"] = "native_reel_story"
+            reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
+            native_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
         if result.created_video:
             print(f"Reel saved at: {result.reel_path}")
         elif result.cover_path.exists():
@@ -468,7 +573,8 @@ def generate(args: argparse.Namespace) -> int:
         if not result.created_video:
             for warning in result.warnings:
                 print(f"Warning: {warning}", file=sys.stderr)
-        voiceover_info = write_voiceover_assets(plan, output_dir, result.reel_path)
+        if getattr(args, "voiceover", False):
+            voiceover_info = write_voiceover_assets(plan, output_dir, result.reel_path, args, reel_plan)
 
     exporter.save_image_selection_report(output_dir, image_selection_report)
     metadata = build_metadata(
@@ -489,6 +595,8 @@ def generate(args: argparse.Namespace) -> int:
         reel_export=reel_export,
     )
     metadata["voiceover"] = voiceover_info
+    if native_reel_mode:
+        metadata["native_reel_render"] = native_reel_render_metadata
     metadata = preserve_existing_context(existing_metadata, metadata)
     sanitizer_report = (
         sanitize_post_images(plan, raw_dir=raw_dir, sanitized_dir=sanitized_dir)
@@ -517,6 +625,15 @@ def generate(args: argparse.Namespace) -> int:
         }
     )
     exporter.save_metadata(output_dir, metadata)
+    if native_reel_mode and reel_plan is not None:
+        native_reel_quality = run_native_reel_quality_gate(
+            output_dir=output_dir,
+            reel_plan=reel_plan,
+            metadata=metadata,
+            voiceover_requested=bool(getattr(args, "voiceover", False)),
+        )
+        metadata["native_reel_quality"] = native_reel_quality
+        exporter.save_metadata(output_dir, metadata)
     quality_report = run_post_quality_gate(output_dir, plan, metadata)
     contact_sheet = create_qa_contact_sheet(
         final_dir=final_dir,
@@ -524,6 +641,12 @@ def generate(args: argparse.Namespace) -> int:
         publish_ready=quality_report.publish_ready,
         score=quality_report.score,
         design_score=int(quality_report.details.get("design_score", 0) or 0),
+        native_reel_score=int(metadata.get("native_reel_quality", {}).get("native_reel_score", 0))
+        if isinstance(metadata.get("native_reel_quality", {}), dict)
+        else None,
+        ai_slideshow_risk_score=int(metadata.get("native_reel_quality", {}).get("ai_slideshow_risk_score", 0))
+        if isinstance(metadata.get("native_reel_quality", {}), dict)
+        else None,
         topic=plan.topic,
         reel_path=str(output_dir / "final_reel" / "reel.mp4") if getattr(args, "make_reel", False) else "",
         cover_path=str(output_dir / "final_reel" / "cover.jpg") if getattr(args, "make_reel", False) else "",
@@ -531,16 +654,24 @@ def generate(args: argparse.Namespace) -> int:
     metadata["qa_contact_sheet"] = str(contact_sheet)
     exporter.save_metadata(output_dir, metadata)
     quality_report = run_post_quality_gate(output_dir, plan, metadata)
+    if native_reel_mode:
+        write_native_reel_redesign_reports(output_dir, quality_report, metadata)
 
     print("Done.")
     print_generation_summary(output_dir, quality_report, resume_suggestion=not quality_report.publish_ready)
     return 0
 
 
-def write_voiceover_assets(plan: CarouselPlan, output_dir: Path, reel_path: Path) -> dict[str, object]:
+def write_voiceover_assets(
+    plan: CarouselPlan,
+    output_dir: Path,
+    reel_path: Path,
+    args: argparse.Namespace,
+    reel_plan: ReelPlan | None = None,
+) -> dict[str, object]:
     voiceover_dir = output_dir / "voiceover"
     voiceover_dir.mkdir(parents=True, exist_ok=True)
-    script = build_voiceover_script(plan)
+    script = reel_plan.voiceover_script if reel_plan is not None else build_voiceover_script(plan)
     script_path = voiceover_dir / "voiceover_script.txt"
     script_path.write_text(script + "\n", encoding="utf-8")
 
@@ -550,19 +681,38 @@ def write_voiceover_assets(plan: CarouselPlan, output_dir: Path, reel_path: Path
         "tts_created": False,
         "tts_path": "",
         "reel_with_voice_path": "",
-        "tts_note": "pip install edge-tts",
+        "tts_note": "",
         "blocking_publish_ready": False,
+        "voice": getattr(args, "voice", "en-US-GuyNeural"),
+        "voice_rate": getattr(args, "voice_rate", "-5%"),
     }
+    provider = str(getattr(args, "tts_provider", "auto") or "auto").lower()
+    if provider == "none":
+        info["tts_note"] = "TTS disabled by --tts-provider none."
+        return info
+
     edge_tts = shutil.which("edge-tts")
-    if not edge_tts:
+    command_prefix = [edge_tts] if edge_tts else [sys.executable, "-m", "edge_tts"]
+    module_available = edge_tts is not None
+    if not module_available:
+        probe = subprocess.run(
+            [sys.executable, "-c", "import edge_tts"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        module_available = probe.returncode == 0
+    if provider in {"auto", "edge"} and not module_available:
+        info["tts_note"] = "edge-tts is not installed or importable."
         return info
 
     mp3_path = voiceover_dir / "voiceover.mp3"
     completed = subprocess.run(
-        [
-            edge_tts,
+        command_prefix
+        + [
             "--voice",
-            "en-US-GuyNeural",
+            str(getattr(args, "voice", "en-US-GuyNeural")),
+            f"--rate={getattr(args, 'voice_rate', '-5%')}",
             "--text",
             script,
             "--write-media",
@@ -582,7 +732,7 @@ def write_voiceover_assets(plan: CarouselPlan, output_dir: Path, reel_path: Path
 
     info["tts_created"] = True
     info["tts_path"] = str(mp3_path)
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = get_ffmpeg_path()
     if ffmpeg and reel_path.exists():
         voiced_path = output_dir / "final_reel" / "reel_with_voice.mp4"
         muxed = subprocess.run(
@@ -621,9 +771,9 @@ def build_voiceover_script(plan: CarouselPlan) -> str:
     lower = topic.lower()
     if "ocean" in lower and "overnight" in lower:
         return (
-            "What if oceans rose overnight? Streets become rivers first. Then power fails, "
-            "roads vanish, and clean water becomes the real problem. You have one question left: "
-            "where would you go?"
+            "What if oceans rose overnight? In the first hours, roads disappear under water. "
+            "Then power, transport, and clean water start failing. The danger is not just drowning. "
+            "It is being trapped. You have one question left: where would you go first?"
         )
     headlines = [slide.headline.rstrip(".?") for slide in plan.slides[:5]]
     if len(headlines) >= 5:
@@ -638,6 +788,23 @@ def load_plan(path: Path) -> CarouselPlan:
     if not path.exists():
         raise ValueError(f"Plan file not found: {path}")
     return CarouselPlan.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def save_reel_plan(output_dir: Path, reel_plan: ReelPlan) -> None:
+    (output_dir / "reel_plan.json").write_text(
+        json.dumps(reel_plan.model_dump(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_reel_plan(path: Path) -> ReelPlan | None:
+    if not path.exists():
+        return None
+    return ReelPlan.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def is_native_reel_story(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "template", "") or "").strip() == "native_reel_story"
 
 
 def load_existing_metadata(output_dir: Path) -> dict[str, object]:
@@ -738,6 +905,8 @@ def generate_or_select_images(
     request_count = 0
     for slide in plan.slides:
         built_prompt = build_image_prompt(slide, niche)
+        if is_native_reel_story(args):
+            built_prompt = SimpleNamespace(prompt=build_native_scene_image_prompt(slide.image_prompt, slide.slide_number))
         variant_paths = existing_variant_paths(raw_dir, slide.slide_number)
         selected_raw = raw_dir / f"slide_{slide.slide_number:02d}.jpg"
         if args.resume and selected_raw.exists() and selected_raw not in variant_paths:
@@ -790,12 +959,68 @@ def generate_or_select_images(
             final_path=final_image_path,
             niche=niche,
         )
+        if is_native_reel_story(args) and _selection_needs_native_retry(selection_to_dict(selection)):
+            alternate_path = raw_dir / f"slide_{slide.slide_number:02d}_variant_alt.jpg"
+            alternate_prompt = build_native_scene_image_prompt(slide.image_prompt, slide.slide_number, alternate=True)
+            print(f"    alternate cleanup candidate for scene {slide.slide_number:02d}")
+            image_client.generate_image(alternate_prompt, alternate_path)
+            variant_paths.append(alternate_path)
+            selection = select_best_candidate(
+                slide=slide,
+                prompt=alternate_prompt,
+                variant_paths=variant_paths,
+                final_path=final_image_path,
+                niche=niche,
+            )
         report["slides"].append(selection_to_dict(selection))
     return report
 
 
 def existing_variant_paths(raw_dir: Path, slide_number: int) -> list[Path]:
     return sorted(raw_dir.glob(f"slide_{slide_number:02d}_variant_*.jpg"))
+
+
+def build_native_scene_image_prompt(base_prompt: str, scene_number: int, alternate: bool = False) -> str:
+    scene_angles = {
+        1: "wide establishing view with flooded city depth and tiny human silhouettes",
+        2: "street-level flooded road perspective, not a skyline",
+        3: "interior apartment survival detail, flashlight glow, close human-scale objects",
+        4: "flooded metro entrance and blocked escape infrastructure, dark reflective water",
+        5: "rooftop survivor from behind above submerged skyline, quiet final question",
+    }
+    alternate_note = (
+        "Alternate cleanup pass: avoid all signage, avoid billboards, avoid readable marks, use plain architecture and water texture."
+        if alternate
+        else ""
+    )
+    return " ".join(
+        part.strip()
+        for part in [
+            base_prompt,
+            scene_angles.get(scene_number, "distinct cinematic documentary angle"),
+            "native vertical 9:16 composition, full-screen cinematic frame, premium tense documentary realism",
+            "strong subject separation, natural light, no empty black lower band, no carousel layout, no poster design",
+            "strict image-only rule: no text, no letters, no words, no signs, no signage, no labels, no logos, no watermark, no typography",
+            alternate_note,
+        ]
+        if part.strip()
+    )
+
+
+def _selection_needs_native_retry(selection: dict[str, object]) -> bool:
+    warnings = selection.get("image_quality_warnings", [])
+    scores = selection.get("scores", [])
+    if isinstance(warnings, list) and any(
+        any(term in str(warning).lower() for term in ("text", "watermark", "gibberish", "artifact"))
+        for warning in warnings
+    ):
+        return True
+    if isinstance(scores, list):
+        selected = str(selection.get("selected_variant", ""))
+        for score in scores:
+            if isinstance(score, dict) and str(score.get("filename", "")) == selected:
+                return float(score.get("artifact_risk_score", 0.0) or 0.0) >= 55.0
+    return False
 
 
 def preserve_existing_context(
@@ -848,6 +1073,79 @@ def print_generation_summary(
             print(f"  - {issue}")
         if resume_suggestion:
             print(f'Suggested command: python -m app.main generate --output-dir "{output_dir}" --resume')
+
+
+def write_native_reel_redesign_reports(
+    output_dir: Path,
+    quality_report: PostQualityReport,
+    metadata: dict[str, object],
+) -> None:
+    qa_dir = output_dir.parents[1] / "qa" if len(output_dir.parents) >= 2 else output_dir / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    native = metadata.get("native_reel_quality", {})
+    voiceover = metadata.get("voiceover", {})
+    reel_export = metadata.get("reel_export", {})
+    native_dict = native if isinstance(native, dict) else {}
+    voiceover_dict = voiceover if isinstance(voiceover, dict) else {}
+    reel_dict = reel_export if isinstance(reel_export, dict) else {}
+    reel_path = str(reel_dict.get("reel_path", output_dir / "final_reel" / "reel.mp4"))
+    cover_path = str(reel_dict.get("cover_path", output_dir / "final_reel" / "cover.jpg"))
+    voiceover_script_path = str(voiceover_dict.get("script_path", output_dir / "voiceover" / "voiceover_script.txt"))
+    reel_with_voice_path = str(voiceover_dict.get("reel_with_voice_path", ""))
+    publish_ready = bool(quality_report.publish_ready and native_dict.get("publish_ready", False))
+    native_blockers_raw = native_dict.get("blocking_issues", [])
+    native_blockers = [str(item) for item in native_blockers_raw] if isinstance(native_blockers_raw, list) else []
+    remaining_blockers = sorted(set([*quality_report.blocking_issues, *native_blockers]))
+    payload = {
+        "output_folder": str(output_dir),
+        "publish_ready": publish_ready,
+        "technical_score": quality_report.score,
+        "native_reel_score": int(native_dict.get("native_reel_score", 0) or 0),
+        "first_second_hook_score": int(native_dict.get("first_second_hook_score", 0) or 0),
+        "scene_variety_score": int(native_dict.get("scene_variety_score", 0) or 0),
+        "ai_slideshow_risk_score": int(native_dict.get("ai_slideshow_risk_score", 0) or 0),
+        "cover_quality_score": int(native_dict.get("cover_quality_score", 0) or 0),
+        "voiceover_status": voiceover_dict.get("tts_note", "not requested"),
+        "voiceover_created": bool(voiceover_dict.get("tts_created", False)),
+        "reel_mp4_path": reel_path,
+        "reel_with_voice_mp4_path": reel_with_voice_path,
+        "cover_jpg_path": cover_path,
+        "voiceover_script_path": voiceover_script_path,
+        "human_should_post": publish_ready,
+        "remaining_blockers": remaining_blockers,
+        "report_path": str(qa_dir / "native_reel_redesign_report.md"),
+        "qa_contact_sheet": str(output_dir / "qa_contact_sheet.jpg"),
+    }
+    (qa_dir / "native_reel_redesign_report.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    lines = [
+        "# Native Reel Redesign Report",
+        "",
+        f"- output_folder: {payload['output_folder']}",
+        f"- publish_ready: {str(payload['publish_ready']).lower()}",
+        f"- technical_score: {payload['technical_score']}",
+        f"- native_reel_score: {payload['native_reel_score']}",
+        f"- first_second_hook_score: {payload['first_second_hook_score']}",
+        f"- scene_variety_score: {payload['scene_variety_score']}",
+        f"- ai_slideshow_risk_score: {payload['ai_slideshow_risk_score']}",
+        f"- cover_quality_score: {payload['cover_quality_score']}",
+        f"- voiceover_status: {payload['voiceover_status']}",
+        f"- reel_mp4_path: {payload['reel_mp4_path']}",
+        f"- reel_with_voice_mp4_path: {payload['reel_with_voice_mp4_path']}",
+        f"- cover_jpg_path: {payload['cover_jpg_path']}",
+        f"- voiceover_script_path: {payload['voiceover_script_path']}",
+        f"- human_should_post: {str(payload['human_should_post']).lower()}",
+        "",
+        "## Remaining Blockers",
+    ]
+    lines.extend(f"- {item}" for item in remaining_blockers) if remaining_blockers else lines.append("- None")
+    (qa_dir / "native_reel_redesign_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    readiness_name = "ready_to_post_report" if publish_ready else "not_ready_report"
+    (qa_dir / f"{readiness_name}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (qa_dir / f"{readiness_name}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def reel_export_metadata(result: object, requested: bool) -> dict[str, object]:
@@ -1013,11 +1311,16 @@ def auto(args: argparse.Namespace) -> int:
         raise ValueError("--count must be at least 1.")
 
     config = load_config()
-    sources = parse_source_names(args.sources)
     output_dir = resolve_output_dir(config.project_root, args.output)
-    pipeline = DiscoveryPipeline.from_names(sources)
-    discovery_count = max(args.count, 10)
-    candidates = pipeline.discover(niche=args.niche, count=discovery_count, query=args.query, lane=args.lane)
+    if is_native_reel_story(args):
+        pipeline_warnings: list[str] = []
+        candidates = [deterministic_native_reel_candidate(args.niche)]
+    else:
+        sources = parse_source_names(args.sources)
+        pipeline = DiscoveryPipeline.from_names(sources)
+        discovery_count = max(args.count, 10)
+        candidates = pipeline.discover(niche=args.niche, count=discovery_count, query=args.query, lane=args.lane)
+        pipeline_warnings = pipeline.warnings
     if not candidates:
         print("No topic candidates found. Try --sources static or a broader --query.", file=sys.stderr)
         return 1
@@ -1029,7 +1332,7 @@ def auto(args: argparse.Namespace) -> int:
         niche=args.niche.strip().lower(),
         lane=args.lane,
         report_date=date.today(),
-        warnings=pipeline.warnings,
+        warnings=pipeline_warnings,
     )
 
     print("Selected topic(s):")
@@ -1054,6 +1357,10 @@ def auto(args: argparse.Namespace) -> int:
             llm_provider=args.llm_provider,
             compare_plans=args.compare_plans,
             make_reel=args.make_reel,
+            voiceover=args.voiceover,
+            tts_provider=args.tts_provider,
+            voice=args.voice,
+            voice_rate=args.voice_rate,
             plan_file=None,
             output_dir=None,
             render_only=False,
@@ -1215,6 +1522,34 @@ def build_discovery_metadata(args: argparse.Namespace) -> dict[str, object]:
         "topic_discovery_warnings": candidate.warnings,
         "auto_selected": True,
     }
+
+
+def deterministic_native_reel_candidate(niche: str) -> TopicCandidate:
+    return TopicCandidate(
+        topic="What if oceans rose overnight?",
+        niche=niche,
+        lane="what_if_disaster",
+        angle="A tense survival question told through five native cinematic Reel scenes.",
+        source="deterministic_native_reel_story",
+        source_title="Native Reel benchmark scenario",
+        source_summary="Hardcoded benchmark for the first Unreal Science and What-If native Reel.",
+        keywords=["oceans", "flood", "survival", "what if"],
+        visual_shock_score=96,
+        curiosity_gap_score=94,
+        dm_share_potential=88,
+        watch_retention_potential=92,
+        cold_audience_fit=90,
+        first_second_clarity=96,
+        score=94,
+        score_breakdown={
+            "visual_shock": 96,
+            "curiosity_gap": 94,
+            "watch_retention": 92,
+            "cold_audience_fit": 90,
+        },
+        reasons=["Deterministic benchmark for native Reel story mode."],
+        warnings=[],
+    )
 
 
 def parse_source_names(value: str) -> list[str]:

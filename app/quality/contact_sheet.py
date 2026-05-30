@@ -15,11 +15,15 @@ def create_qa_contact_sheet(
     publish_ready: bool | None = None,
     score: int | None = None,
     design_score: int | None = None,
+    native_reel_score: int | None = None,
+    ai_slideshow_risk_score: int | None = None,
     topic: str = "",
     reel_path: str = "",
     cover_path: str = "",
 ) -> Path:
-    slide_paths = sorted(path for path in final_dir.glob("slide_*.jpg") if path.is_file())
+    native_frames_dir = final_dir.parent / "final_reel" / "frames"
+    native_frame_paths = sorted(path for path in native_frames_dir.glob("frame_*.jpg") if path.is_file())
+    slide_paths = native_frame_paths or sorted(path for path in final_dir.glob("slide_*.jpg") if path.is_file())
     if not slide_paths:
         return output_path
 
@@ -45,6 +49,10 @@ def create_qa_contact_sheet(
         status.append(f"technical={score}")
     if design_score is not None:
         status.append(f"design={design_score}")
+    if native_reel_score is not None:
+        status.append(f"native_reel={native_reel_score}")
+    if ai_slideshow_risk_score is not None:
+        status.append(f"slideshow_risk={ai_slideshow_risk_score}")
     draw.text((gap, 20), "QA Contact Sheet", font=title_font, fill=(242, 242, 238))
     draw.text((gap, 55), "  ".join(status), font=label_font, fill=(222, 222, 216))
     if topic:
@@ -69,7 +77,8 @@ def create_qa_contact_sheet(
         slide_y = y + row * (thumb_h + 44)
         _paste_thumb(canvas, path, (slide_x, slide_y), (thumb_w, thumb_h))
         draw.rectangle((slide_x, slide_y, slide_x + thumb_w, slide_y + thumb_h), outline=(70, 70, 70), width=1)
-        draw.text((slide_x, slide_y + thumb_h + 9), f"slide_{index + 1:02d}", font=label_font, fill=(222, 222, 216))
+        label = f"frame_{index + 1:02d}" if native_frame_paths else f"slide_{index + 1:02d}"
+        draw.text((slide_x, slide_y + thumb_h + 9), label, font=label_font, fill=(222, 222, 216))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output_path, "JPEG", quality=92, optimize=True)
