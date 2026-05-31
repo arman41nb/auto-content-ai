@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -113,8 +115,14 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         blocking.append("Reel video was requested but final_reel/reel.mp4 was not created.")
         score -= 20
 
+    voiceover_check = _voiceover_quality_report(output_dir, metadata)
+    warnings.extend(voiceover_check["voiceover_warnings"])
+    if voiceover_check["voiceover_blocking_issues"]:
+        blocking.extend(voiceover_check["voiceover_blocking_issues"])
+        score -= min(35, 12 * len(voiceover_check["voiceover_blocking_issues"]))
+
     native_reel_quality = metadata.get("native_reel_quality", {})
-    if isinstance(native_reel_quality, dict):
+    if isinstance(native_reel_quality, dict) and native_reel_quality:
         native_reel_score = int(native_reel_quality.get("native_reel_score", 0) or 0)
         first_second_hook_score = int(native_reel_quality.get("first_second_hook_score", 0) or 0)
         scene_variety_score = int(native_reel_quality.get("scene_variety_score", 0) or 0)
@@ -179,6 +187,7 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
             "cover_quality_score": native_reel_quality.get("cover_quality_score", 0)
             if isinstance(native_reel_quality, dict)
             else 0,
+            **voiceover_check,
             **design,
         },
     )
@@ -205,6 +214,10 @@ def write_post_quality_report(output_dir: Path, report: PostQualityReport) -> No
         f"- scene_variety_score: {report.details.get('scene_variety_score', 0)}",
         f"- ai_slideshow_risk_score: {report.details.get('ai_slideshow_risk_score', 0)}",
         f"- cover_quality_score: {report.details.get('cover_quality_score', 0)}",
+        f"- voiceover_requested: {str(report.details.get('voiceover_requested', False)).lower()}",
+        f"- voiceover_ready: {str(report.details.get('voiceover_ready', False)).lower()}",
+        f"- voiceover_audio_stream_present: {str(report.details.get('voiceover_audio_stream_present', False)).lower()}",
+        f"- voiceover_duration_seconds: {report.details.get('voiceover_duration_seconds', 0)}",
         f"- recommended_action: {report.recommended_action}",
         f"- artifact_detection_scope: {report.details.get('artifact_detection_scope', 'raw')}",
         "",
@@ -217,6 +230,14 @@ def write_post_quality_report(output_dir: Path, report: PostQualityReport) -> No
     lines.extend(["", "## Warnings"])
     if report.warnings:
         lines.extend(f"- {warning}" for warning in report.warnings)
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Voiceover Checks"])
+    lines.append(f"- reel_with_voice_path: {report.details.get('reel_with_voice_path', '')}")
+    lines.append(f"- voiceover_quality_score: {report.details.get('voiceover_quality_score', 100)}")
+    voiceover_blockers = report.details.get("voiceover_blocking_issues", [])
+    if isinstance(voiceover_blockers, list) and voiceover_blockers:
+        lines.extend(f"- {issue}" for issue in voiceover_blockers)
     else:
         lines.append("- None")
     lines.extend(["", "## Design Checks"])
@@ -302,6 +323,116 @@ def _design_quality_report(output_dir: Path, final_paths: list[Path], metadata: 
         "reel_first_ready": reel_first_ready,
         "amateur_template_warnings": _dedupe(amateur_warnings),
         "design_recommended_action": recommended,
+    }
+
+
+def _voiceover_quality_report(output_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    voiceover = metadata.get("voiceover", {})
+    voiceover_dict = voiceover if isinstance(voiceover, dict) else {}
+    native_reel_quality = metadata.get("native_reel_quality", {})
+    native_dict = native_reel_quality if isinstance(native_reel_quality, dict) else {}
+    requested = bool(metadata.get("voiceover_requested", False) or native_dict.get("voiceover_requested", False))
+
+    script_path = Path(str(voiceover_dict.get("script_path") or output_dir / "voiceover" / "voiceover_script.txt"))
+    tts_path = Path(str(voiceover_dict.get("tts_path") or output_dir / "voiceover" / "voiceover.mp3"))
+    reel_with_voice_path = Path(
+        str(voiceover_dict.get("reel_with_voice_path") or output_dir / "final_reel" / "reel_with_voice.mp4")
+    )
+
+    mux_probe = _ffprobe_stream_summary(reel_with_voice_path)
+    tts_probe = _ffprobe_stream_summary(tts_path)
+    audio_stream = mux_probe["audio_stream"]
+    audio_duration = float(tts_probe["audio_duration_seconds"] or audio_stream.get("duration_seconds", 0.0) or 0.0)
+    audio_codec = str(audio_stream.get("codec_name", ""))
+    has_audio_stream = bool(audio_stream)
+
+    warnings: list[str] = []
+    blockers: list[str] = []
+    if requested:
+        if not script_path.exists():
+            blockers.append("Voiceover was requested but voiceover_script.txt is missing.")
+        if not tts_path.exists():
+            blockers.append("Voiceover was requested but voiceover audio is missing.")
+        if not reel_with_voice_path.exists():
+            blockers.append("Voiceover was requested but reel_with_voice.mp4 is missing.")
+        if reel_with_voice_path.exists() and not has_audio_stream:
+            blockers.append("Voiceover was requested but reel_with_voice.mp4 has no audio stream.")
+        if tts_path.exists() and audio_duration <= 0.2:
+            blockers.append("Voiceover audio duration is empty or near-zero.")
+        elif audio_duration and not 3.0 <= audio_duration <= 25.0:
+            warnings.append(f"Voiceover duration may be unusual: {audio_duration:.2f}s.")
+
+    score = 100
+    if requested:
+        score = 100 - min(70, 18 * len(blockers)) - min(20, 5 * len(warnings))
+        if script_path.exists():
+            score += 3
+        if tts_path.exists():
+            score += 3
+        if has_audio_stream:
+            score += 4
+        score = max(0, min(100, score))
+
+    return {
+        "voiceover_requested": requested,
+        "voiceover_ready": requested and not blockers and script_path.exists() and tts_path.exists() and has_audio_stream,
+        "voiceover_script_path": str(script_path),
+        "voiceover_audio_path": str(tts_path),
+        "voiceover_audio_exists": tts_path.exists(),
+        "voiceover_audio_stream_present": has_audio_stream,
+        "voiceover_audio_codec": audio_codec,
+        "voiceover_duration_seconds": round(audio_duration, 3),
+        "reel_with_voice_path": str(reel_with_voice_path),
+        "voiceover_quality_score": score,
+        "voiceover_warnings": _dedupe(warnings),
+        "voiceover_blocking_issues": _dedupe(blockers),
+    }
+
+
+def _ffprobe_stream_summary(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"video_stream": {}, "audio_stream": {}, "format_duration_seconds": 0.0, "audio_duration_seconds": 0.0}
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return {"video_stream": {}, "audio_stream": {}, "format_duration_seconds": 0.0, "audio_duration_seconds": 0.0}
+    completed = subprocess.run(
+        [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return {"video_stream": {}, "audio_stream": {}, "format_duration_seconds": 0.0, "audio_duration_seconds": 0.0}
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return {"video_stream": {}, "audio_stream": {}, "format_duration_seconds": 0.0, "audio_duration_seconds": 0.0}
+
+    video_stream: dict[str, Any] = {}
+    audio_stream: dict[str, Any] = {}
+    for stream in payload.get("streams", []):
+        if not isinstance(stream, dict):
+            continue
+        if stream.get("codec_type") == "video" and not video_stream:
+            video_stream = {
+                "codec_name": stream.get("codec_name", ""),
+                "width": int(stream.get("width", 0) or 0),
+                "height": int(stream.get("height", 0) or 0),
+                "duration_seconds": _float_or_zero(stream.get("duration")),
+            }
+        if stream.get("codec_type") == "audio" and not audio_stream:
+            audio_stream = {
+                "codec_name": stream.get("codec_name", ""),
+                "duration_seconds": _float_or_zero(stream.get("duration")),
+            }
+    format_payload = payload.get("format", {})
+    format_duration = _float_or_zero(format_payload.get("duration")) if isinstance(format_payload, dict) else 0.0
+    audio_duration = float(audio_stream.get("duration_seconds", 0.0) or format_duration if audio_stream else 0.0)
+    return {
+        "video_stream": video_stream,
+        "audio_stream": audio_stream,
+        "format_duration_seconds": format_duration,
+        "audio_duration_seconds": audio_duration,
     }
 
 
@@ -437,6 +568,13 @@ def _dict_of_numbers(value: object) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
     return result
+
+
+def _float_or_zero(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _string_list(value: object) -> list[str]:

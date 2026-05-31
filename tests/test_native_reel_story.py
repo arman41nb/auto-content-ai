@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image
 
 from app.content.reel_schemas import deterministic_ocean_reel_plan, reel_plan_to_carousel_plan
-from app.main import build_parser
+from app.main import build_parser, build_voiceover_script
 from app.quality.native_reel_quality import run_native_reel_quality_gate
+from app.quality.post_quality_gate import run_post_quality_gate
 from app.render.native_reel_renderer import export_native_reel_story
 
 
@@ -113,6 +116,123 @@ class NativeReelStoryTests(unittest.TestCase):
         self.assertEqual(len(plan.slides), 5)
         self.assertEqual(plan.slides[0].headline, "THE OCEAN MOVES")
         self.assertEqual(plan.selected_pattern, "native_reel_story")
+
+    def test_voiceover_script_generation_returns_short_cinematic_script(self) -> None:
+        plan = reel_plan_to_carousel_plan(deterministic_ocean_reel_plan())
+        script = build_voiceover_script(plan)
+        word_count = len(script.split())
+
+        self.assertGreaterEqual(word_count, 25)
+        self.assertLessEqual(word_count, 45)
+        self.assertIn("What if oceans rose overnight?", script)
+        self.assertNotIn("#", script)
+        self.assertNotIn("follow for more", script.lower())
+
+    def test_post_quality_gate_blocks_requested_voiceover_without_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plan = reel_plan_to_carousel_plan(deterministic_ocean_reel_plan())
+            _write_final_slides(root)
+            voiceover_dir = root / "voiceover"
+            voiceover_dir.mkdir()
+            script_path = voiceover_dir / "voiceover_script.txt"
+            script_path.write_text(deterministic_ocean_reel_plan().voiceover_script + "\n", encoding="utf-8")
+
+            report = run_post_quality_gate(
+                root,
+                plan,
+                {
+                    "voiceover_requested": True,
+                    "voiceover": {"script_created": True, "script_path": str(script_path)},
+                },
+            )
+
+        self.assertFalse(report.publish_ready)
+        self.assertFalse(report.details["voiceover_ready"])
+        self.assertIn("Voiceover was requested but voiceover audio is missing.", report.blocking_issues)
+
+    def test_post_quality_gate_passes_when_requested_voiceover_has_audio_stream(self) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg is not available")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plan = reel_plan_to_carousel_plan(deterministic_ocean_reel_plan())
+            _write_final_slides(root)
+            voiceover_dir = root / "voiceover"
+            reel_dir = root / "final_reel"
+            voiceover_dir.mkdir()
+            reel_dir.mkdir()
+            script_path = voiceover_dir / "voiceover_script.txt"
+            script_path.write_text(deterministic_ocean_reel_plan().voiceover_script + "\n", encoding="utf-8")
+            audio_path = voiceover_dir / "voiceover.mp3"
+            voiced_path = reel_dir / "reel_with_voice.mp4"
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=4",
+                    "-c:a",
+                    "libmp3lame",
+                    str(audio_path),
+                ],
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=blue:s=1080x1920:d=4:r=24",
+                    "-i",
+                    str(audio_path),
+                    "-shortest",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    str(voiced_path),
+                ],
+                capture_output=True,
+                check=True,
+            )
+
+            report = run_post_quality_gate(
+                root,
+                plan,
+                {
+                    "voiceover_requested": True,
+                    "voiceover": {
+                        "script_created": True,
+                        "script_path": str(script_path),
+                        "tts_created": True,
+                        "tts_path": str(audio_path),
+                        "reel_with_voice_path": str(voiced_path),
+                    },
+                },
+            )
+
+        self.assertTrue(report.publish_ready)
+        self.assertTrue(report.details["voiceover_ready"])
+        self.assertTrue(report.details["voiceover_audio_stream_present"])
+        self.assertGreater(report.details["voiceover_duration_seconds"], 0)
+
+
+def _write_final_slides(root: Path) -> None:
+    final_dir = root / "final_slides"
+    final_dir.mkdir()
+    colors = [(210, 80, 70), (65, 150, 210), (235, 205, 80), (85, 190, 135), (180, 90, 190)]
+    for index, color in enumerate(colors, start=1):
+        Image.new("RGB", (1080, 1350), color).save(final_dir / f"slide_{index:02d}.jpg")
 
 
 if __name__ == "__main__":

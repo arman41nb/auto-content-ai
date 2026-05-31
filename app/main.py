@@ -441,6 +441,7 @@ def generate(args: argparse.Namespace) -> int:
                 "render_template_used_per_slide": render_template_used_per_slide,
                 "reel_export": reel_export,
                 "voiceover": voiceover_info,
+                "voiceover_requested": bool(getattr(args, "voiceover", False)),
                 "native_reel_render": native_reel_render_metadata if native_reel_mode else {},
                 "warnings": sorted(set([*warnings, *existing_metadata.get("warnings", [])]))
                 if isinstance(existing_metadata.get("warnings", []), list)
@@ -595,6 +596,7 @@ def generate(args: argparse.Namespace) -> int:
         reel_export=reel_export,
     )
     metadata["voiceover"] = voiceover_info
+    metadata["voiceover_requested"] = bool(getattr(args, "voiceover", False))
     if native_reel_mode:
         metadata["native_reel_render"] = native_reel_render_metadata
     metadata = preserve_existing_context(existing_metadata, metadata)
