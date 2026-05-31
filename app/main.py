@@ -242,6 +242,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_voiceover_arguments(batch)
     batch.add_argument("--batch-dir", default=None, help="Existing batch folder for --score-only, or output batch folder.")
     batch.add_argument("--score-only", action="store_true", help="Recompute comparison reports without LLM or images.")
+
+    compare_batch_parser = subparsers.add_parser("compare-batch", help="Recompute native Reel batch scores only.")
+    compare_batch_parser.add_argument("--batch-dir", required=True, help="Existing batch folder to rescore.")
+    compare_batch_parser.add_argument(
+        "--voiceover",
+        action="store_true",
+        default=True,
+        help="Expect reel_with_voice audio streams when scoring candidates.",
+    )
     return parser
 
 
@@ -1708,18 +1717,35 @@ def write_batch_comparison_reports(batch_dir: Path, payload: dict[str, object]) 
         "",
         "## Candidates",
         "",
-        "| rank | topic | lane | publish_ready | score | native | hook | variety | voice | cover | risk | output |",
-        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| rank | topic | lane | output folder | publish_ready | candidate score | native | hook | variety | voice | cover | slideshow risk | reel_with_voice | cover path | main weaknesses |",
+        "|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
     ]
     if isinstance(candidates, list):
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
+            weaknesses = candidate.get("main_weaknesses", [])
+            weakness_text = "; ".join(str(item) for item in weaknesses) if isinstance(weaknesses, list) else str(weaknesses)
             lines.append(
-                "| {rank} | {topic} | {lane} | {publish_ready} | {candidate_score} | {native_reel_score} | "
-                "{first_second_hook_score} | {scene_variety_score} | {voiceover_quality_score} | "
-                "{cover_quality_score} | {ai_slideshow_risk_score} | {output_folder} |".format(
-                    **{key: str(value).replace("|", "/") for key, value in candidate.items()}
+                "| {rank} | {topic} | {lane} | {output_folder} | {publish_ready} | {candidate_score} | "
+                "{native_reel_score} | {first_second_hook_score} | {scene_variety_score} | "
+                "{voiceover_quality_score} | {cover_quality_score} | {ai_slideshow_risk_score} | "
+                "{reel_with_voice_path} | {cover_path} | {main_weaknesses} |".format(
+                    rank=_md_cell(candidate.get("rank", "")),
+                    topic=_md_cell(candidate.get("topic", "")),
+                    lane=_md_cell(candidate.get("lane", "")),
+                    output_folder=_md_cell(candidate.get("output_folder", "")),
+                    publish_ready=_md_cell(candidate.get("publish_ready", "")),
+                    candidate_score=_md_cell(candidate.get("candidate_score", "")),
+                    native_reel_score=_md_cell(candidate.get("native_reel_score", "")),
+                    first_second_hook_score=_md_cell(candidate.get("first_second_hook_score", "")),
+                    scene_variety_score=_md_cell(candidate.get("scene_variety_score", "")),
+                    voiceover_quality_score=_md_cell(candidate.get("voiceover_quality_score", "")),
+                    cover_quality_score=_md_cell(candidate.get("cover_quality_score", "")),
+                    ai_slideshow_risk_score=_md_cell(candidate.get("ai_slideshow_risk_score", "")),
+                    reel_with_voice_path=_md_cell(candidate.get("reel_with_voice_path", "")),
+                    cover_path=_md_cell(candidate.get("cover_path", "")),
+                    main_weaknesses=_md_cell(weakness_text or "None"),
                 )
             )
     best = payload.get("best_candidate", {})
@@ -1748,6 +1774,11 @@ def write_batch_comparison_reports(batch_dir: Path, payload: dict[str, object]) 
     for path in manual_files_to_inspect(best_dict):
         lines.append(f"- {path}")
     (batch_dir / "batch_comparison_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _md_cell(value: object) -> str:
+    text = str(value).replace("\n", " ").replace("|", "/").strip()
+    return text or ""
 
 
 def write_system_completion_audit(batch_dir: Path, ready: bool) -> None:
@@ -2102,6 +2133,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "auto":
             return auto(args)
         if args.command == "batch-reels":
+            return batch_reels(args)
+        if args.command == "compare-batch":
+            args.template = "native_reel_story"
+            args.score_only = True
+            args.count = 0
+            args.niche = None
+            args.lane = "any"
+            args.sources = "static"
+            args.handle = "@yourpage"
+            args.image_variants = 3
+            args.rate_limit = None
+            args.llm_provider = None
             return batch_reels(args)
         parser.error(f"Unknown command: {args.command}")
         return 2
