@@ -144,9 +144,24 @@ def _first_second_hook_score(reel_plan: ReelPlan) -> int:
     text = first.on_screen_text.lower()
     voice = first.voiceover_line.lower()
     score = 72
-    if "ocean" in text or "ocean" in voice:
+    hook_terms = (
+        "ocean",
+        "oxygen",
+        "moon",
+        "gravity",
+        "earth",
+        "sun",
+        "star",
+        "planet",
+        "black hole",
+        "storm",
+        "city",
+        "ai",
+        "robot",
+    )
+    if any(term in text or term in voice for term in hook_terms):
         score += 10
-    if any(word in text for word in ("moves", "rose", "vanish", "fails")):
+    if any(word in text for word in ("moves", "rose", "vanish", "fails", "changes", "breaks", "hits", "shifts")):
         score += 10
     if first.duration_seconds <= 2.2:
         score += 5
@@ -207,9 +222,10 @@ def _cover_quality_score(cover_path: Path, reel_plan: ReelPlan) -> int:
     if not _image_is_size(cover_path, REEL_SIZE):
         return 0
     score = 86
-    if "OCEAN" in reel_plan.cover_text.upper():
+    cover_words = reel_plan.cover_text.split()
+    if any(word in reel_plan.cover_text.upper() for word in ("IF", "REAL", "FUTURE", "OCEAN")):
         score += 8
-    if len(reel_plan.cover_text.split()) <= 5:
+    if len(cover_words) <= 5:
         score += 6
     return min(100, score)
 

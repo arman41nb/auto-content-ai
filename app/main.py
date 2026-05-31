@@ -16,7 +16,12 @@ from PIL import Image
 
 from app.config import load_config
 from app.content.planner import CarouselPlanner
-from app.content.reel_schemas import ReelPlan, deterministic_ocean_reel_plan, reel_plan_to_carousel_plan
+from app.content.reel_schemas import (
+    ReelPlan,
+    deterministic_ocean_reel_plan,
+    native_reel_plan_for_topic,
+    reel_plan_to_carousel_plan,
+)
 from app.content.schemas import CarouselPlan
 from app.discovery.discovery_pipeline import DiscoveryPipeline, write_discovery_reports
 from app.discovery.schemas import TopicCandidate
@@ -25,7 +30,8 @@ from app.image.prompt_builder import build_image_prompt
 from app.image.quality import score_candidate, select_best_candidate, selection_to_dict
 from app.image.sanitizer import preferred_image_dir, sanitize_post_images
 from app.llm.provider_factory import build_llm_providers
-from app.quality.contact_sheet import create_qa_contact_sheet
+from app.quality.candidate_scorer import score_candidate_folder
+from app.quality.contact_sheet import create_batch_contact_sheet, create_qa_contact_sheet
 from app.quality.native_reel_quality import run_native_reel_quality_gate
 from app.quality.overlay_masks import get_expected_overlay_regions
 from app.quality.post_quality_gate import PostQualityReport, run_post_quality_gate
@@ -203,11 +209,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discover and print selected topics without generating carousels.",
     )
     auto.add_argument(
+        "--compare-candidates",
+        action="store_true",
+        help="Generate a native Reel candidate batch and comparison report instead of loose posts.",
+    )
+    auto.add_argument(
         "--make-reel",
         action="store_true",
         help="Create final_reel/cover.jpg and final_reel/reel.mp4 from generated images when FFmpeg is available.",
     )
     add_voiceover_arguments(auto)
+
+    batch = subparsers.add_parser("batch-reels", help="Generate or rescore a native Reel candidate batch.")
+    batch.add_argument("--niche", default=None, help="Content niche: science, future, or history.")
+    batch.add_argument("--lane", choices=LANE_CHOICES, default="any", help="Growth discovery lane.")
+    batch.add_argument("--count", type=int, default=3, help="Number of Reel candidates to generate.")
+    batch.add_argument(
+        "--sources",
+        default="static",
+        help="Comma-separated discovery sources: static,nasa,wikipedia,gdelt.",
+    )
+    batch.add_argument("--handle", default="@yourpage", help="Small handle rendered on each scene.")
+    batch.add_argument("--image-variants", type=int, default=3, help="Image candidates per scene.")
+    batch.add_argument("--rate-limit", type=float, default=None, help="Seconds between Pollinations requests.")
+    batch.add_argument(
+        "--llm-provider",
+        choices=["auto", "groq", "gemini", "openrouter", "cerebras"],
+        default=None,
+        help="Accepted for command parity; native Reel batch uses deterministic plans.",
+    )
+    batch.add_argument("--template", default="native_reel_story", help="Must be native_reel_story for Reel batches.")
+    add_voiceover_arguments(batch)
+    batch.add_argument("--batch-dir", default=None, help="Existing batch folder for --score-only, or output batch folder.")
+    batch.add_argument("--score-only", action="store_true", help="Recompute comparison reports without LLM or images.")
     return parser
 
 
@@ -287,7 +321,11 @@ def generate(args: argparse.Namespace) -> int:
         exporter.save_plan(output_dir, plan)
         planning_info = empty_planning_info(provider="plan_file", model=str(resolve_output_dir(config.project_root, args.plan_file)))
     elif native_reel_mode:
-        reel_plan = deterministic_ocean_reel_plan(str(args.niche or "science"))
+        discovery_candidate = getattr(args, "topic_discovery_candidate", None)
+        topic = str(getattr(discovery_candidate, "topic", None) or args.topic or "What if oceans rose overnight?")
+        lane = str(getattr(discovery_candidate, "lane", "what_if_disaster") or "what_if_disaster")
+        angle = str(getattr(discovery_candidate, "angle", "") or "")
+        reel_plan = native_reel_plan_for_topic(topic, str(args.niche or "science"), lane=lane, angle=angle)
         plan = reel_plan_to_carousel_plan(reel_plan)
         args.topic = reel_plan.topic
         args.niche = reel_plan.niche
@@ -301,7 +339,7 @@ def generate(args: argparse.Namespace) -> int:
         print(f"Output: {output_dir}")
         exporter.save_plan(output_dir, plan)
         save_reel_plan(output_dir, reel_plan)
-        planning_info = empty_planning_info(provider="deterministic", model="native_reel_story/oceans_rose_overnight")
+        planning_info = empty_planning_info(provider="deterministic", model="native_reel_story/topic_factory")
     else:
         output_dir = (
             resolve_output_dir(config.project_root, args.output_dir)
@@ -984,11 +1022,11 @@ def existing_variant_paths(raw_dir: Path, slide_number: int) -> list[Path]:
 
 def build_native_scene_image_prompt(base_prompt: str, scene_number: int, alternate: bool = False) -> str:
     scene_angles = {
-        1: "wide establishing view with flooded city depth and tiny human silhouettes",
-        2: "street-level flooded road perspective, not a skyline",
-        3: "interior apartment survival detail, flashlight glow, close human-scale objects",
-        4: "flooded metro entrance and blocked escape infrastructure, dark reflective water",
-        5: "rooftop survivor from behind above submerged skyline, quiet final question",
+        1: "wide establishing view with clear scale and tiny human silhouettes",
+        2: "street-level consequence perspective, not a generic skyline",
+        3: "close human-scale survival detail, flashlight glow, tangible objects",
+        4: "blocked route or damaged infrastructure, tense visible stakes",
+        5: "single person seen from behind facing the changed world, quiet final question",
     }
     alternate_note = (
         "Alternate cleanup pass: avoid all signage, avoid billboards, avoid readable marks, use plain architecture and water texture."
@@ -1311,6 +1349,11 @@ def discover(args: argparse.Namespace) -> int:
 def auto(args: argparse.Namespace) -> int:
     if args.count < 1:
         raise ValueError("--count must be at least 1.")
+    if getattr(args, "compare_candidates", False):
+        args.command = "batch-reels"
+        if not getattr(args, "make_reel", False):
+            args.make_reel = True
+        return batch_reels(args)
 
     config = load_config()
     output_dir = resolve_output_dir(config.project_root, args.output)
@@ -1382,6 +1425,431 @@ def auto(args: argparse.Namespace) -> int:
             )
 
     return 0
+
+
+def batch_reels(args: argparse.Namespace) -> int:
+    if str(getattr(args, "template", "") or "") != "native_reel_story":
+        raise ValueError("batch-reels requires --template native_reel_story.")
+    if getattr(args, "score_only", False):
+        if not getattr(args, "batch_dir", None):
+            raise ValueError("--score-only requires --batch-dir.")
+        config = load_config()
+        batch_dir = resolve_output_dir(config.project_root, str(args.batch_dir))
+        if not batch_dir.exists():
+            raise ValueError(f"Batch directory not found: {batch_dir}")
+        result = compare_batch(batch_dir=batch_dir, args=args, generated_count=None)
+        write_batch_factory_report(result, commands_run=[command_text(args)], blockers=[])
+        print_batch_terminal_summary(result)
+        return 0
+
+    if not getattr(args, "niche", None):
+        raise ValueError("--niche is required unless --score-only is used.")
+    if int(getattr(args, "count", 0) or 0) < 1:
+        raise ValueError("--count must be at least 1.")
+    if int(getattr(args, "image_variants", 0) or 0) < 1:
+        raise ValueError("--image-variants must be at least 1.")
+
+    config = load_config()
+    batch_dir = (
+        resolve_output_dir(config.project_root, str(args.batch_dir))
+        if getattr(args, "batch_dir", None)
+        else create_batch_output_dir(config.project_root / "outputs" / "batches")
+    )
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    selected = select_batch_topics(args)
+    if len(selected) < int(args.count):
+        raise ValueError(f"Only found {len(selected)} unique topic(s) for count={args.count}.")
+
+    commands_run = [command_text(args)]
+    generated = 0
+    blockers: list[str] = []
+    for index, candidate in enumerate(selected[: int(args.count)], start=1):
+        candidate_dir = batch_dir / f"candidate_{index:02d}"
+        generate_args = argparse.Namespace(
+            command="generate",
+            topic=candidate.topic,
+            niche=args.niche,
+            slides=5,
+            handle=args.handle,
+            template="native_reel_story",
+            skip_images=False,
+            skip_render=False,
+            rate_limit=args.rate_limit,
+            image_variants=args.image_variants,
+            show_grounding=False,
+            llm_provider=args.llm_provider,
+            compare_plans=False,
+            make_reel=True,
+            voiceover=bool(getattr(args, "voiceover", False)),
+            tts_provider=args.tts_provider,
+            voice=args.voice,
+            voice_rate=args.voice_rate,
+            plan_file=None,
+            output_dir=str(candidate_dir),
+            render_only=False,
+            resume=False,
+            topic_discovery_candidate=candidate,
+        )
+        try:
+            result = generate(generate_args)
+        except Exception as exc:
+            blockers.append(f"candidate_{index:02d} failed: {exc}")
+            break
+        if result != 0:
+            blockers.append(f"candidate_{index:02d} generation returned exit code {result}.")
+            break
+        generated += 1
+        save_discovery_context_with_post(
+            output_dir=candidate_dir,
+            candidate=candidate,
+            report_json=batch_dir / "batch_topics.json",
+            report_markdown=batch_dir / "batch_topics.md",
+        )
+
+    write_batch_topic_report(batch_dir, selected[: int(args.count)])
+    result = compare_batch(batch_dir=batch_dir, args=args, generated_count=generated)
+    write_batch_factory_report(result, commands_run=commands_run, blockers=blockers)
+    print_batch_terminal_summary(result)
+    return 0 if generated == int(args.count) else 1
+
+
+def create_batch_output_dir(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    base = f"{date.today():%Y-%m-%d}_native_reel_batch"
+    index = 1
+    while True:
+        candidate = root / f"{base}_{index:02d}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def select_batch_topics(args: argparse.Namespace) -> list[TopicCandidate]:
+    sources = parse_source_names(str(args.sources))
+    if args.lane != "any":
+        pipeline = DiscoveryPipeline.from_names(sources)
+        candidates = pipeline.discover(niche=args.niche, count=max(args.count * 3, args.count), lane=args.lane)
+        return diverse_batch_selection(candidates, args.count)
+
+    by_lane: dict[str, list[TopicCandidate]] = {}
+    for lane in ("what_if_disaster", "extreme_science", "future_scenario"):
+        pipeline = DiscoveryPipeline.from_names(sources)
+        by_lane[lane] = pipeline.discover(niche=args.niche, count=max(args.count * 4, 8), lane=lane)
+
+    ordered_pool = [
+        *by_lane.get("what_if_disaster", [])[:3],
+        *by_lane.get("extreme_science", [])[:3],
+        *by_lane.get("future_scenario", [])[:3],
+        *by_lane.get("what_if_disaster", [])[3:],
+        *by_lane.get("extreme_science", [])[3:],
+        *by_lane.get("future_scenario", [])[3:],
+    ]
+    return diverse_batch_selection(ordered_pool, args.count)
+
+
+def diverse_batch_selection(candidates: list[TopicCandidate], count: int) -> list[TopicCandidate]:
+    selected: list[TopicCandidate] = []
+    seen_topics: set[str] = set()
+    flood_like_used = False
+    for candidate in candidates:
+        key = normalize_topic_key(candidate.topic)
+        if key in seen_topics:
+            continue
+        flood_like = topic_is_flood_like(candidate)
+        if flood_like and flood_like_used:
+            continue
+        selected.append(candidate)
+        seen_topics.add(key)
+        flood_like_used = flood_like_used or flood_like
+        if len(selected) == count:
+            return selected
+
+    for candidate in candidates:
+        key = normalize_topic_key(candidate.topic)
+        if key in seen_topics:
+            continue
+        selected.append(candidate)
+        seen_topics.add(key)
+        if len(selected) == count:
+            break
+    return selected
+
+
+def normalize_topic_key(topic: str) -> str:
+    return " ".join(topic.lower().strip().split())
+
+
+def topic_is_flood_like(candidate: TopicCandidate) -> bool:
+    text = " ".join([candidate.topic, candidate.angle, " ".join(candidate.keywords)]).lower()
+    return any(term in text for term in ("ocean", "flood", "tsunami", "tide", "water", "iceberg"))
+
+
+def write_batch_topic_report(batch_dir: Path, candidates: list[TopicCandidate]) -> None:
+    payload = {"candidates": [candidate.model_dump() for candidate in candidates]}
+    (batch_dir / "batch_topics.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = ["# Batch Topics", ""]
+    for index, candidate in enumerate(candidates, start=1):
+        lines.append(f"{index}. {candidate.topic} | lane={candidate.lane} | score={candidate.score}")
+    (batch_dir / "batch_topics.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def compare_batch(
+    batch_dir: Path,
+    args: argparse.Namespace,
+    generated_count: int | None,
+) -> dict[str, object]:
+    candidate_dirs = sorted(path for path in batch_dir.glob("candidate_*") if path.is_dir())
+    candidates = [
+        score_candidate_folder(candidate_dir, voiceover_requested=bool(getattr(args, "voiceover", True)))
+        for candidate_dir in candidate_dirs
+        if (candidate_dir / "metadata.json").exists()
+    ]
+    candidates.sort(key=lambda item: (int(item.get("candidate_score", 0)), int(item.get("native_reel_score", 0))), reverse=True)
+    for rank, candidate in enumerate(candidates, start=1):
+        candidate["rank"] = rank
+        ensure_candidate_contact_sheet(candidate)
+
+    best = candidates[0] if candidates else {}
+    best_payload = build_best_candidate_payload(best)
+    (batch_dir / "best_candidate.json").write_text(json.dumps(best_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    batch_contact_sheet = create_batch_contact_sheet(candidates, batch_dir / "batch_contact_sheet.jpg")
+    payload = {
+        "batch_folder": str(batch_dir),
+        "generation_timestamp": datetime.now().astimezone().isoformat(),
+        "command_used": command_text(args),
+        "candidates_generated": generated_count if generated_count is not None else len(candidates),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "best_candidate": best_payload,
+        "why_it_won": best_payload.get("reasons", []),
+        "ready_for_human_review": bool(candidates),
+        "manual_files_to_inspect": manual_files_to_inspect(best_payload),
+        "batch_contact_sheet_path": str(batch_contact_sheet),
+    }
+    write_batch_comparison_reports(batch_dir, payload)
+    write_system_completion_audit(batch_dir, bool(candidates))
+    return payload
+
+
+def ensure_candidate_contact_sheet(candidate: dict[str, object]) -> None:
+    output_dir = Path(str(candidate.get("output_folder", "")))
+    if not output_dir.exists():
+        return
+    sheet = output_dir / "qa_contact_sheet.jpg"
+    if sheet.exists():
+        return
+    create_qa_contact_sheet(
+        final_dir=output_dir / "final_slides",
+        output_path=sheet,
+        publish_ready=bool(candidate.get("publish_ready", False)),
+        score=int(candidate.get("technical_quality_score", 0) or 0),
+        native_reel_score=int(candidate.get("native_reel_score", 0) or 0),
+        ai_slideshow_risk_score=int(candidate.get("ai_slideshow_risk_score", 0) or 0),
+        topic=str(candidate.get("topic", "")),
+        reel_path=str(candidate.get("reel_path", "")),
+        cover_path=str(candidate.get("cover_path", "")),
+    )
+
+
+def build_best_candidate_payload(best: dict[str, object]) -> dict[str, object]:
+    if not best:
+        return {
+            "topic": "",
+            "lane": "",
+            "output_folder": "",
+            "reel_with_voice_path": "",
+            "cover_path": "",
+            "caption_path": "",
+            "hashtags_path": "",
+            "candidate_score": 0,
+            "publish_ready": False,
+            "reasons": [],
+            "warnings": ["No candidates were available to score."],
+        }
+    return {
+        "topic": best.get("topic", ""),
+        "lane": best.get("lane", ""),
+        "output_folder": best.get("output_folder", ""),
+        "reel_with_voice_path": best.get("reel_with_voice_path", ""),
+        "cover_path": best.get("cover_path", ""),
+        "caption_path": best.get("caption_path", ""),
+        "hashtags_path": best.get("hashtags_path", ""),
+        "candidate_score": best.get("candidate_score", 0),
+        "publish_ready": best.get("publish_ready", False),
+        "reasons": best.get("reasons", []),
+        "warnings": best.get("warnings", []),
+    }
+
+
+def manual_files_to_inspect(best: dict[str, object]) -> list[str]:
+    paths = [
+        best.get("reel_with_voice_path", ""),
+        best.get("cover_path", ""),
+        best.get("caption_path", ""),
+        best.get("hashtags_path", ""),
+        best.get("output_folder", ""),
+    ]
+    return [str(path) for path in paths if str(path).strip()]
+
+
+def write_batch_comparison_reports(batch_dir: Path, payload: dict[str, object]) -> None:
+    (batch_dir / "batch_comparison_report.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    candidates = payload.get("candidates", [])
+    lines = [
+        "# Batch Comparison Report",
+        "",
+        f"- batch folder: {payload['batch_folder']}",
+        f"- generation timestamp: {payload['generation_timestamp']}",
+        f"- command used: `{payload['command_used']}`",
+        f"- ready for human review: {str(payload['ready_for_human_review']).lower()}",
+        "",
+        "## Candidates",
+        "",
+        "| rank | topic | lane | publish_ready | score | native | hook | variety | voice | cover | risk | output |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            lines.append(
+                "| {rank} | {topic} | {lane} | {publish_ready} | {candidate_score} | {native_reel_score} | "
+                "{first_second_hook_score} | {scene_variety_score} | {voiceover_quality_score} | "
+                "{cover_quality_score} | {ai_slideshow_risk_score} | {output_folder} |".format(
+                    **{key: str(value).replace("|", "/") for key, value in candidate.items()}
+                )
+            )
+    best = payload.get("best_candidate", {})
+    best_dict = best if isinstance(best, dict) else {}
+    lines.extend(
+        [
+            "",
+            "## Best Candidate",
+            "",
+            f"- topic: {best_dict.get('topic', '')}",
+            f"- lane: {best_dict.get('lane', '')}",
+            f"- candidate_score: {best_dict.get('candidate_score', 0)}",
+            f"- publish_ready: {str(best_dict.get('publish_ready', False)).lower()}",
+            f"- reel_with_voice_path: {best_dict.get('reel_with_voice_path', '')}",
+            f"- cover_path: {best_dict.get('cover_path', '')}",
+            "",
+            "## Why It Won",
+        ]
+    )
+    reasons = best_dict.get("reasons", [])
+    if isinstance(reasons, list) and reasons:
+        lines.extend(f"- {reason}" for reason in reasons)
+    else:
+        lines.append("- No winner selected.")
+    lines.extend(["", "## Exact Files To Inspect"])
+    for path in manual_files_to_inspect(best_dict):
+        lines.append(f"- {path}")
+    (batch_dir / "batch_comparison_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_system_completion_audit(batch_dir: Path, ready: bool) -> None:
+    qa_dir = batch_dir.parents[1] / "qa" if len(batch_dir.parents) >= 2 else batch_dir / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "candidate_factory": "done",
+        "batch_comparison": "done",
+        "best_candidate_selection": "done",
+        "ready_for_manual_reviewed_batch_generation": ready,
+        "ready_for_fully_automatic_posting": False,
+        "batch_folder": str(batch_dir),
+    }
+    (qa_dir / "system_completion_audit.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = ["# System Completion Audit", ""]
+    for key, value in payload.items():
+        lines.append(f"- {key}: {str(value).lower() if isinstance(value, bool) else value}")
+    (qa_dir / "system_completion_audit.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_batch_factory_report(
+    result: dict[str, object],
+    commands_run: list[str],
+    blockers: list[str],
+) -> None:
+    batch_dir = Path(str(result.get("batch_folder", "")))
+    qa_dir = batch_dir.parents[1] / "qa" if batch_dir.exists() and len(batch_dir.parents) >= 2 else Path("outputs/qa")
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    best = result.get("best_candidate", {})
+    best_dict = best if isinstance(best, dict) else {}
+    payload = {
+        "implementation_summary": "Added native Reel batch candidate generation, scoring, comparison reports, best candidate selection, and contact sheets.",
+        "commands_run": commands_run,
+        "batch_folder": result.get("batch_folder", ""),
+        "candidates_generated": result.get("candidates_generated", 0),
+        "best_candidate": best_dict,
+        "batch_system_ready": bool(result.get("ready_for_human_review", False)) and not blockers,
+        "remaining_blockers": blockers,
+        "human_review_required": True,
+        "ready_for_fully_automatic_posting": False,
+    }
+    (qa_dir / "batch_reel_factory_report.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [
+        "# Batch Reel Factory Report",
+        "",
+        f"- implementation summary: {payload['implementation_summary']}",
+        f"- batch folder: {payload['batch_folder']}",
+        f"- candidates generated: {payload['candidates_generated']}",
+        f"- best candidate: {best_dict.get('topic', '')}",
+        f"- batch system ready: {str(payload['batch_system_ready']).lower()}",
+        f"- human review required: {str(payload['human_review_required']).lower()}",
+        f"- ready for fully automatic posting: false",
+        "",
+        "## Commands Run",
+    ]
+    lines.extend(f"- `{command}`" for command in commands_run)
+    lines.extend(["", "## Remaining Blockers"])
+    lines.extend(f"- {blocker}" for blocker in blockers) if blockers else lines.append("- None")
+    (qa_dir / "batch_reel_factory_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def command_text(args: argparse.Namespace) -> str:
+    existing = getattr(args, "command_used", "")
+    if existing:
+        return str(existing)
+    command = str(getattr(args, "command", "batch-reels"))
+    if command == "batch-reels":
+        parts = ["python -m app.main batch-reels"]
+        for name in ("niche", "lane", "count", "sources", "handle", "image_variants", "rate_limit", "llm_provider", "template"):
+            value = getattr(args, name, None)
+            if value is not None:
+                parts.append(f"--{name.replace('_', '-')} {quote_arg(value)}")
+        if getattr(args, "voiceover", False):
+            parts.append("--voiceover")
+        if getattr(args, "batch_dir", None):
+            parts.append(f"--batch-dir {quote_arg(getattr(args, 'batch_dir'))}")
+        if getattr(args, "score_only", False):
+            parts.append("--score-only")
+        return " ".join(parts)
+    return f"python -m app.main {command}"
+
+
+def quote_arg(value: object) -> str:
+    text = str(value)
+    if re.search(r"\s|@", text):
+        return '"' + text.replace('"', '\\"') + '"'
+    return text
+
+
+def print_batch_terminal_summary(result: dict[str, object]) -> None:
+    best = result.get("best_candidate", {})
+    best_dict = best if isinstance(best, dict) else {}
+    print(f"batch folder: {result.get('batch_folder', '')}")
+    print(f"candidates generated: {result.get('candidates_generated', 0)}")
+    print(f"best candidate topic: {best_dict.get('topic', '')}")
+    print(f"best candidate score: {best_dict.get('candidate_score', 0)}")
+    print(f"best candidate reel_with_voice path: {best_dict.get('reel_with_voice_path', '')}")
+    print(f"best candidate cover path: {best_dict.get('cover_path', '')}")
+    print(f"batch comparison report path: {Path(str(result.get('batch_folder', ''))) / 'batch_comparison_report.md'}")
+    print(f"batch contact sheet path: {result.get('batch_contact_sheet_path', '')}")
+    print(f"system ready for manual-reviewed batch generation: {str(result.get('ready_for_human_review', False)).lower()}")
+    print("system ready for fully automatic posting: false")
 
 
 def build_metadata(
@@ -1624,6 +2092,7 @@ def print_grounding_summary(
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.command_used = "python -m app.main " + " ".join(argv if argv is not None else sys.argv[1:])
 
     try:
         if args.command == "generate":
@@ -1632,6 +2101,8 @@ def main(argv: list[str] | None = None) -> int:
             return discover(args)
         if args.command == "auto":
             return auto(args)
+        if args.command == "batch-reels":
+            return batch_reels(args)
         parser.error(f"Unknown command: {args.command}")
         return 2
     except Exception as exc:

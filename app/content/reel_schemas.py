@@ -161,6 +161,183 @@ def deterministic_ocean_reel_plan(niche: str = "science") -> ReelPlan:
     )
 
 
+def native_reel_plan_for_topic(
+    topic: str,
+    niche: str = "science",
+    lane: str = "what_if_disaster",
+    angle: str = "",
+) -> ReelPlan:
+    """Return a deterministic native Reel story plan for a selected topic."""
+
+    normalized_topic = " ".join(topic.strip().split()) or "What if oceans rose overnight?"
+    if normalized_topic.lower() == "what if oceans rose overnight?":
+        return deterministic_ocean_reel_plan(niche)
+
+    subject = _topic_subject(normalized_topic)
+    cover_text = _cover_text(subject, lane)
+    title = normalized_topic
+    scenario = _scenario_words(subject, lane)
+    visual_base = _visual_base(subject, lane, angle)
+    voice_subject = _voice_subject(subject)
+
+    return ReelPlan(
+        topic=normalized_topic,
+        niche=niche,
+        title=title,
+        cover_text=cover_text,
+        scenes=[
+            ReelScene(
+                scene_number=1,
+                duration_seconds=2.0,
+                on_screen_text=_short_text(subject, "CHANGES"),
+                voiceover_line=f"What if {voice_subject} changed overnight?",
+                visual_prompt=(
+                    f"{visual_base}, immediate wide establishing shot, visible shock in the first second, "
+                    "cinematic documentary realism, no text, no signs, no logos, no watermark, no typography"
+                ),
+                camera_motion="slow zoom from 100% to 108%, slight left-to-right pan",
+                transition="cut",
+            ),
+            ReelScene(
+                scene_number=2,
+                duration_seconds=2.0,
+                on_screen_text=scenario["text_2"],
+                voiceover_line=scenario["voice_2"],
+                visual_prompt=(
+                    f"{visual_base}, streets and people reacting to the first consequence, realistic scale, "
+                    "natural light, no text, no signs, no logos, no watermark, no typography"
+                ),
+                camera_motion="slow zoom from 100% to 108%, slight right-to-left pan",
+                transition="cut",
+            ),
+            ReelScene(
+                scene_number=3,
+                duration_seconds=2.0,
+                on_screen_text=scenario["text_3"],
+                voiceover_line=scenario["voice_3"],
+                visual_prompt=(
+                    f"{visual_base}, close human-scale survival detail, damaged infrastructure, cinematic depth, "
+                    "no text, no signs, no logos, no watermark, no typography"
+                ),
+                camera_motion="slow zoom from 100% to 108%, slight upward pan",
+                transition="fade",
+            ),
+            ReelScene(
+                scene_number=4,
+                duration_seconds=2.0,
+                on_screen_text=scenario["text_4"],
+                voiceover_line=scenario["voice_4"],
+                visual_prompt=(
+                    f"{visual_base}, tense blocked route or impossible landscape, high realism, dramatic but clean, "
+                    "no text, no signs, no logos, no watermark, no typography"
+                ),
+                camera_motion="slow zoom from 100% to 108%, slight left-to-right pan",
+                transition="cut",
+            ),
+            ReelScene(
+                scene_number=5,
+                duration_seconds=2.0,
+                on_screen_text="WHAT WOULD YOU DO?",
+                voiceover_line="The question is simple: what would you do first?",
+                visual_prompt=(
+                    f"{visual_base}, single person seen from behind facing the changed world, quiet cinematic ending, "
+                    "no text, no signs, no logos, no watermark, no typography"
+                ),
+                camera_motion="slow zoom from 100% to 108%, slight right-to-left pan",
+                transition="fade",
+            ),
+        ],
+    )
+
+
+def _topic_subject(topic: str) -> str:
+    text = topic.strip().rstrip("?")
+    lower = text.lower()
+    if lower.startswith("what if "):
+        text = text[8:]
+    return text[:1].lower() + text[1:]
+
+
+def _cover_text(subject: str, lane: str) -> str:
+    words = [word.upper() for word in re.findall(r"[A-Za-z0-9]+", subject)[:4]]
+    if lane == "extreme_science":
+        words = ["REAL"] + words[:3]
+    elif lane == "future_scenario":
+        words = ["FUTURE"] + words[:3]
+    else:
+        words = ["IF"] + words[:3]
+    return " ".join(words[:5]) or "SCIENCE WHAT IF"
+
+
+def _voice_subject(subject: str) -> str:
+    words = re.findall(r"[A-Za-z0-9]+", subject)
+    if len(words) <= 7:
+        return subject
+    return " ".join(words[:7])
+
+
+def _short_text(subject: str, fallback: str) -> str:
+    words = [word.upper() for word in re.findall(r"[A-Za-z0-9]+", subject)[:3]]
+    return " ".join([*words, fallback][:5]) if words else fallback
+
+
+def _scenario_words(subject: str, lane: str) -> dict[str, str]:
+    lower = subject.lower()
+    if lane == "extreme_science":
+        return {
+            "text_2": "SCALE BREAKS",
+            "voice_2": "First, the scale stops feeling normal.",
+            "text_3": "PHYSICS HITS",
+            "voice_3": "Then gravity, heat, or pressure becomes the threat.",
+            "text_4": "NOT A MOVIE",
+            "voice_4": "The strangest part is that the physics can be real.",
+        }
+    if lane == "future_scenario":
+        return {
+            "text_2": "CITIES SHIFT",
+            "voice_2": "First, daily life changes in places everyone understands.",
+            "text_3": "HABITS BREAK",
+            "voice_3": "Then work, safety, and trust start changing together.",
+            "text_4": "NEW RISKS",
+            "voice_4": "The future looks useful until the hidden risks appear.",
+        }
+    if any(word in lower for word in ("oxygen", "air", "atmosphere")):
+        return {
+            "text_2": "BREATH STOPS",
+            "voice_2": "First, breathing and fire stop behaving normally.",
+            "text_3": "PRESSURE HITS",
+            "voice_3": "Then pressure, sound, and panic move through the city.",
+            "text_4": "SECONDS MATTER",
+            "voice_4": "The danger is measured in seconds, not hours.",
+        }
+    if any(word in lower for word in ("moon", "gravity", "black hole")):
+        return {
+            "text_2": "TIDES SURGE",
+            "voice_2": "First, oceans and bodies feel the force.",
+            "text_3": "STRUCTURES FAIL",
+            "voice_3": "Then buildings, roads, and routines start to fail.",
+            "text_4": "NO EASY EXIT",
+            "voice_4": "The trap is invisible until everything moves.",
+        }
+    return {
+        "text_2": "WORLD SHIFTS",
+        "voice_2": "First, the change reaches streets, homes, and bodies.",
+        "text_3": "SYSTEMS FAIL",
+        "voice_3": "Then power, transport, and clean water become uncertain.",
+        "text_4": "NO EASY EXIT",
+        "voice_4": "The danger is not the first shock. It is being trapped.",
+    }
+
+
+def _visual_base(subject: str, lane: str, angle: str) -> str:
+    descriptor = angle or subject
+    if lane == "extreme_science":
+        return f"cinematic science documentary still of {descriptor}, extreme space or planetary environment"
+    if lane == "future_scenario":
+        return f"cinematic near-future documentary still of {descriptor}, believable city-scale change"
+    return f"cinematic survival documentary still of {descriptor}, sudden visible consequence"
+
+
 def reel_plan_to_carousel_plan(reel_plan: ReelPlan) -> CarouselPlan:
     """Bridge native Reel scenes into the existing image-generation pipeline."""
 
@@ -188,15 +365,15 @@ def reel_plan_to_carousel_plan(reel_plan: ReelPlan) -> CarouselPlan:
         niche=reel_plan.niche,
         title=reel_plan.title,
         selected_pattern="native_reel_story",
-        content_angle="A tense five-scene survival question about sudden overnight ocean rise.",
+        content_angle=f"A tense five-scene native Reel story about {reel_plan.topic}.",
         target_audience="Zero-follower cold Instagram viewers who share cinematic what-if scenarios.",
         tone="premium, tense, cinematic, minimal, survival-focused",
         caption=(
-            "Imagine waking up to a shoreline that moved into the city overnight.\n\n"
-            "The first problem is not dramatic trivia; it is roads disappearing, power failing, "
-            "and clean water becoming harder to trust.\n\n"
-            "This Reel keeps the question human-scale: what changes first, what traps you, "
-            "and where would you move before everyone else tries the same route?\n\n"
+            f"Imagine {reel_plan.topic.rstrip('?').lower()}.\n\n"
+            "The first problem is not the spectacle. It is what changes immediately: movement, "
+            "safety, power, water, and the decisions people make before they understand the new rules.\n\n"
+            "This Reel keeps the idea visual and human-scale: what changes first, what traps you, "
+            "and what you would do before everyone else tries the same plan.\n\n"
             "What would your first decision be?"
         ),
         hashtags=["science", "whatif", "unrealscience"],

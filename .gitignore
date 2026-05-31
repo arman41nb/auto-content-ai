@@ -13,6 +13,7 @@ venv/
 env/
 
 outputs/posts/
+outputs/batches/
 outputs/discovery/
 outputs/qa/
 outputs/_*/
