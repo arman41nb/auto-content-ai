@@ -15,6 +15,7 @@ env/
 outputs/posts/
 outputs/batches/
 outputs/discovery/
+outputs/queues/
 outputs/qa/
 outputs/_*/
 outputs/debug*/

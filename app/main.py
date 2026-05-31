@@ -243,6 +243,37 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--batch-dir", default=None, help="Existing batch folder for --score-only, or output batch folder.")
     batch.add_argument("--score-only", action="store_true", help="Recompute comparison reports without LLM or images.")
 
+    weekly = subparsers.add_parser("weekly-queue", help="Plan, generate, or rescore a weekly native Reel queue.")
+    weekly.add_argument("--niche", default=None, help="Content niche: science, future, or history.")
+    weekly.add_argument("--lane", choices=LANE_CHOICES, default="any", help="Growth discovery lane.")
+    weekly.add_argument("--days", type=int, default=7, help="Number of queue days.")
+    weekly.add_argument("--candidates-per-day", type=int, default=3, help="Candidates to generate per day.")
+    weekly.add_argument(
+        "--sources",
+        default="static",
+        help="Comma-separated discovery sources: static,nasa,wikipedia,gdelt.",
+    )
+    weekly.add_argument("--handle", default="@yourpage", help="Small handle rendered on each scene.")
+    weekly.add_argument("--image-variants", type=int, default=3, help="Image candidates per scene.")
+    weekly.add_argument("--rate-limit", type=float, default=None, help="Seconds between Pollinations requests.")
+    weekly.add_argument(
+        "--llm-provider",
+        choices=["auto", "groq", "gemini", "openrouter", "cerebras"],
+        default=None,
+        help="Accepted for command parity; native Reel queue uses deterministic plans.",
+    )
+    weekly.add_argument("--template", default="native_reel_story", help="Must be native_reel_story for weekly queues.")
+    add_voiceover_arguments(weekly)
+    weekly.add_argument("--dry-run", action="store_true", help="Discover and assign topics without LLM, images, or video.")
+    weekly.add_argument("--score-only", action="store_true", help="Recompute queue reports from existing candidate outputs.")
+    weekly.add_argument("--queue-dir", default=None, help="Existing queue folder for --score-only, or output queue folder.")
+    weekly.add_argument(
+        "--max-full-generations",
+        type=int,
+        default=None,
+        help="Required cap for real generation; must be at least days*candidates-per-day.",
+    )
+
     compare_batch_parser = subparsers.add_parser("compare-batch", help="Recompute native Reel batch scores only.")
     compare_batch_parser.add_argument("--batch-dir", required=True, help="Existing batch folder to rescore.")
     compare_batch_parser.add_argument(
@@ -1534,6 +1565,10 @@ def create_batch_output_dir(root: Path) -> Path:
 
 
 def select_batch_topics(args: argparse.Namespace) -> list[TopicCandidate]:
+    weekly_topics = getattr(args, "weekly_queue_topics", None)
+    if isinstance(weekly_topics, list) and all(isinstance(item, TopicCandidate) for item in weekly_topics):
+        return weekly_topics
+
     sources = parse_source_names(str(args.sources))
     if args.lane != "any":
         pipeline = DiscoveryPipeline.from_names(sources)
@@ -2134,6 +2169,12 @@ def main(argv: list[str] | None = None) -> int:
             return auto(args)
         if args.command == "batch-reels":
             return batch_reels(args)
+        if args.command == "weekly-queue":
+            if not getattr(args, "score_only", False) and not getattr(args, "niche", None):
+                raise ValueError("--niche is required unless --score-only is used.")
+            from app.queue.weekly_queue import run_weekly_queue
+
+            return run_weekly_queue(args, batch_runner=batch_reels)
         if args.command == "compare-batch":
             args.template = "native_reel_story"
             args.score_only = True
