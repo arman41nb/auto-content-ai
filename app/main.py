@@ -36,8 +36,10 @@ from app.quality.native_reel_quality import run_native_reel_quality_gate
 from app.quality.overlay_masks import get_expected_overlay_regions
 from app.quality.post_quality_gate import PostQualityReport, run_post_quality_gate
 from app.render.carousel_renderer import CarouselRenderer
+from app.render.media_utils import audio_duration_seconds, video_duration_seconds
 from app.render.native_reel_renderer import export_native_reel_story, get_ffmpeg_path
 from app.render.reel_exporter import export_reel_package
+from app.render.subtitles import build_subtitle_cues, write_subtitle_files
 from app.research.research_pack_loader import load_research_pack
 from app.storage.post_exporter import PostExporter
 from app.strategy.pattern_library import load_relevant_patterns
@@ -482,6 +484,10 @@ def generate(args: argparse.Namespace) -> int:
                     image_dir=preferred_image_dir(output_dir, raw_dir),
                     output_dir=output_dir,
                     handle=args.handle,
+                    voiceover_duration_seconds=existing_voiceover_duration(output_dir)
+                    if getattr(args, "voiceover", False)
+                    else 0.0,
+                    create_subtitles=bool(getattr(args, "voiceover", False)),
                 )
             else:
                 result = export_reel_package(
@@ -504,7 +510,14 @@ def generate(args: argparse.Namespace) -> int:
             else:
                 print(f"Reel package notes saved at: {result.output_dir}")
             if getattr(args, "voiceover", False):
-                voiceover_info = write_voiceover_assets(plan, output_dir, result.reel_path, args, reel_plan)
+                voiceover_info = write_voiceover_assets(
+                    plan,
+                    output_dir,
+                    result.reel_path,
+                    args,
+                    reel_plan,
+                    native_reel_render_metadata,
+                )
         metadata = merge_existing_metadata(
             existing_metadata,
             {
@@ -628,6 +641,10 @@ def generate(args: argparse.Namespace) -> int:
                 image_dir=preferred_image_dir(output_dir, raw_dir),
                 output_dir=output_dir,
                 handle=args.handle,
+                voiceover_duration_seconds=existing_voiceover_duration(output_dir)
+                if getattr(args, "voiceover", False)
+                else 0.0,
+                create_subtitles=bool(getattr(args, "voiceover", False)),
             )
         else:
             result = export_reel_package(
@@ -653,7 +670,14 @@ def generate(args: argparse.Namespace) -> int:
             for warning in result.warnings:
                 print(f"Warning: {warning}", file=sys.stderr)
         if getattr(args, "voiceover", False):
-            voiceover_info = write_voiceover_assets(plan, output_dir, result.reel_path, args, reel_plan)
+            voiceover_info = write_voiceover_assets(
+                plan,
+                output_dir,
+                result.reel_path,
+                args,
+                reel_plan,
+                native_reel_render_metadata,
+            )
 
     exporter.save_image_selection_report(output_dir, image_selection_report)
     metadata = build_metadata(
@@ -748,12 +772,25 @@ def write_voiceover_assets(
     reel_path: Path,
     args: argparse.Namespace,
     reel_plan: ReelPlan | None = None,
+    native_reel_render_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     voiceover_dir = output_dir / "voiceover"
     voiceover_dir.mkdir(parents=True, exist_ok=True)
     script = reel_plan.voiceover_script if reel_plan is not None else build_voiceover_script(plan)
     script_path = voiceover_dir / "voiceover_script.txt"
     script_path.write_text(script + "\n", encoding="utf-8")
+    render_metadata = native_reel_render_metadata or {}
+    scene_timings = render_metadata.get("scene_timings", [])
+    if not isinstance(scene_timings, list):
+        scene_timings = []
+    subtitle_info: dict[str, object] = {
+        "subtitles_created": False,
+        "subtitles_burned_in": False,
+        "subtitle_sync_ok": False,
+        "subtitled_video_path": "",
+    }
+    if reel_plan is not None and scene_timings:
+        subtitle_info.update(write_subtitle_files(voiceover_dir, build_subtitle_cues(reel_plan, scene_timings)))
 
     info: dict[str, object] = {
         "script_created": True,
@@ -761,16 +798,82 @@ def write_voiceover_assets(
         "tts_created": False,
         "tts_path": "",
         "reel_with_voice_path": "",
+        "reel_with_voice_subtitled_path": "",
         "tts_note": "",
         "blocking_publish_ready": False,
         "voice": getattr(args, "voice", "en-US-GuyNeural"),
         "voice_rate": getattr(args, "voice_rate", "-5%"),
+        "voiceover_duration_seconds": 0.0,
+        "final_video_duration_seconds": float(render_metadata.get("final_video_duration_seconds", 0.0) or 0.0),
+        "duration_sync_ok": bool(render_metadata.get("duration_sync_ok", False)),
+        "duration_mismatch_seconds": float(render_metadata.get("duration_mismatch_seconds", 0.0) or 0.0),
+        **subtitle_info,
     }
     provider = str(getattr(args, "tts_provider", "auto") or "auto").lower()
-    if provider == "none":
+    mp3_path = voiceover_dir / "voiceover.mp3"
+    if mp3_path.exists():
+        info["tts_created"] = True
+        info["tts_path"] = str(mp3_path)
+        info["tts_note"] = "existing voiceover mp3 reused"
+    elif provider == "none":
         info["tts_note"] = "TTS disabled by --tts-provider none."
         return info
 
+    if not info["tts_created"]:
+        info.update(_create_edge_tts_voiceover(script, mp3_path, voiceover_dir, args, provider))
+    if not info["tts_created"]:
+        return info
+
+    info["voiceover_duration_seconds"] = audio_duration_seconds(mp3_path)
+    ffmpeg = get_ffmpeg_path()
+    if ffmpeg and reel_path.exists():
+        voiced_path = output_dir / "final_reel" / "reel_with_voice.mp4"
+        video_source = _video_source_synced_for_audio(
+            ffmpeg=ffmpeg,
+            source_path=reel_path,
+            output_dir=output_dir,
+            audio_seconds=float(info["voiceover_duration_seconds"] or 0.0),
+        )
+        if _mux_voiceover(ffmpeg, video_source, mp3_path, voiced_path):
+            info["reel_with_voice_path"] = str(voiced_path)
+            info["final_video_duration_seconds"] = video_duration_seconds(voiced_path)
+            info["duration_sync_ok"] = float(info["final_video_duration_seconds"] or 0.0) + 0.05 >= float(
+                info["voiceover_duration_seconds"] or 0.0
+            )
+            info["duration_mismatch_seconds"] = round(
+                max(0.0, float(info["voiceover_duration_seconds"] or 0.0) - float(info["final_video_duration_seconds"] or 0.0)),
+                3,
+            )
+            info["tts_note"] = str(info["tts_note"] or "voiceover mp3 and reel_with_voice.mp4 created")
+        else:
+            info["tts_note"] = "voiceover mp3 available; FFmpeg audio mux failed."
+
+        subtitled_silent = Path(str(render_metadata.get("subtitled_silent_path", "")))
+        if subtitled_silent.exists():
+            subtitled_path = output_dir / "final_reel" / "reel_with_voice_subtitled.mp4"
+            subtitle_video_source = _video_source_synced_for_audio(
+                ffmpeg=ffmpeg,
+                source_path=subtitled_silent,
+                output_dir=output_dir,
+                audio_seconds=float(info["voiceover_duration_seconds"] or 0.0),
+                suffix="_subtitled_extended",
+            )
+            if _mux_voiceover(ffmpeg, subtitle_video_source, mp3_path, subtitled_path):
+                info["reel_with_voice_subtitled_path"] = str(subtitled_path)
+                info["subtitled_video_path"] = str(subtitled_path)
+                info["subtitles_burned_in"] = True
+                info["subtitle_sync_ok"] = bool(info.get("subtitles_created")) and bool(info.get("duration_sync_ok"))
+    return info
+
+
+def _create_edge_tts_voiceover(
+    script: str,
+    mp3_path: Path,
+    voiceover_dir: Path,
+    args: argparse.Namespace,
+    provider: str,
+) -> dict[str, object]:
+    info: dict[str, object] = {"tts_created": False, "tts_path": "", "tts_note": ""}
     edge_tts = shutil.which("edge-tts")
     command_prefix = [edge_tts] if edge_tts else [sys.executable, "-m", "edge_tts"]
     module_available = edge_tts is not None
@@ -786,7 +889,6 @@ def write_voiceover_assets(
         info["tts_note"] = "edge-tts is not installed or importable."
         return info
 
-    mp3_path = voiceover_dir / "voiceover.mp3"
     completed = subprocess.run(
         command_prefix
         + [
@@ -812,38 +914,79 @@ def write_voiceover_assets(
 
     info["tts_created"] = True
     info["tts_path"] = str(mp3_path)
-    ffmpeg = get_ffmpeg_path()
-    if ffmpeg and reel_path.exists():
-        voiced_path = output_dir / "final_reel" / "reel_with_voice.mp4"
-        muxed = subprocess.run(
-            [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(reel_path),
-                "-i",
-                str(mp3_path),
-                "-shortest",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                str(voiced_path),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if muxed.returncode == 0 and voiced_path.exists():
-            info["reel_with_voice_path"] = str(voiced_path)
-            info["tts_note"] = "voiceover mp3 and reel_with_voice.mp4 created"
-        else:
-            info["tts_note"] = "voiceover mp3 created; FFmpeg audio mux failed."
-            (voiceover_dir / "ffmpeg_voiceover_error.txt").write_text(
-                (muxed.stderr or muxed.stdout or "Unknown FFmpeg voiceover error").strip() + "\n",
-                encoding="utf-8",
-            )
+    info["tts_note"] = "voiceover mp3 created"
     return info
+
+
+def _mux_voiceover(ffmpeg: str, video_path: Path, audio_path: Path, output_path: Path) -> bool:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    muxed = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(video_path),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if muxed.returncode == 0 and output_path.exists():
+        return True
+    (audio_path.parent / f"ffmpeg_{output_path.stem}_error.txt").write_text(
+        (muxed.stderr or muxed.stdout or "Unknown FFmpeg voiceover error").strip() + "\n",
+        encoding="utf-8",
+    )
+    return False
+
+
+def _video_source_synced_for_audio(
+    ffmpeg: str,
+    source_path: Path,
+    output_dir: Path,
+    audio_seconds: float,
+    suffix: str = "_extended",
+) -> Path:
+    video_seconds = video_duration_seconds(source_path)
+    target_seconds = audio_seconds + 0.5
+    if video_seconds + 0.05 >= target_seconds:
+        return source_path
+    extended_path = output_dir / "final_reel" / f"{source_path.stem}{suffix}.mp4"
+    pad_seconds = max(0.0, target_seconds - video_seconds)
+    completed = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source_path),
+            "-vf",
+            f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(extended_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return extended_path if completed.returncode == 0 and extended_path.exists() else source_path
 
 
 def build_voiceover_script(plan: CarouselPlan) -> str:
@@ -885,6 +1028,19 @@ def load_reel_plan(path: Path) -> ReelPlan | None:
 
 def is_native_reel_story(args: argparse.Namespace) -> bool:
     return str(getattr(args, "template", "") or "").strip() == "native_reel_story"
+
+
+def existing_voiceover_duration(output_dir: Path) -> float:
+    audio_path = existing_voiceover_audio_path(output_dir)
+    return audio_duration_seconds(audio_path) if audio_path is not None else 0.0
+
+
+def existing_voiceover_audio_path(output_dir: Path) -> Path | None:
+    for name in ("voiceover.mp3", "voiceover.wav", "voiceover.m4a", "voiceover.aac"):
+        path = output_dir / "voiceover" / name
+        if path.exists():
+            return path
+    return None
 
 
 def load_existing_metadata(output_dir: Path) -> dict[str, object]:
@@ -1172,6 +1328,10 @@ def write_native_reel_redesign_reports(
     cover_path = str(reel_dict.get("cover_path", output_dir / "final_reel" / "cover.jpg"))
     voiceover_script_path = str(voiceover_dict.get("script_path", output_dir / "voiceover" / "voiceover_script.txt"))
     reel_with_voice_path = str(voiceover_dict.get("reel_with_voice_path", ""))
+    subtitled_path = str(
+        voiceover_dict.get("reel_with_voice_subtitled_path")
+        or voiceover_dict.get("subtitled_video_path", output_dir / "final_reel" / "reel_with_voice_subtitled.mp4")
+    )
     publish_ready = bool(quality_report.publish_ready and native_dict.get("publish_ready", False))
     native_blockers_raw = native_dict.get("blocking_issues", [])
     native_blockers = [str(item) for item in native_blockers_raw] if isinstance(native_blockers_raw, list) else []
@@ -1185,10 +1345,23 @@ def write_native_reel_redesign_reports(
         "scene_variety_score": int(native_dict.get("scene_variety_score", 0) or 0),
         "ai_slideshow_risk_score": int(native_dict.get("ai_slideshow_risk_score", 0) or 0),
         "cover_quality_score": int(native_dict.get("cover_quality_score", 0) or 0),
+        "professional_edit_score": int(native_dict.get("professional_edit_score", 0) or 0),
+        "viral_readiness_score": int(native_dict.get("viral_readiness_score", 0) or 0),
+        "visual_polish_score": int(native_dict.get("visual_polish_score", 0) or 0),
+        "edit_rhythm_score": int(native_dict.get("edit_rhythm_score", 0) or 0),
+        "duration_sync_score": int(native_dict.get("duration_sync_score", 0) or 0),
+        "subtitle_quality_score": int(native_dict.get("subtitle_quality_score", 0) or 0),
+        "sanitizer_damage_risk": str(metadata.get("sanitizer_visual_damage_risk", "low")),
+        "duration_sync_ok": bool(native_dict.get("duration_sync_ok", False)),
+        "subtitles_created": bool(voiceover_dict.get("subtitles_created", False)),
+        "subtitles_burned_in": bool(voiceover_dict.get("subtitles_burned_in", False)),
+        "video_duration_seconds": float(voiceover_dict.get("final_video_duration_seconds", 0.0) or 0.0),
+        "voiceover_duration_seconds": float(voiceover_dict.get("voiceover_duration_seconds", 0.0) or 0.0),
         "voiceover_status": voiceover_dict.get("tts_note", "not requested"),
         "voiceover_created": bool(voiceover_dict.get("tts_created", False)),
         "reel_mp4_path": reel_path,
         "reel_with_voice_mp4_path": reel_with_voice_path,
+        "reel_with_voice_subtitled_path": subtitled_path,
         "cover_jpg_path": cover_path,
         "voiceover_script_path": voiceover_script_path,
         "human_should_post": publish_ready,
@@ -1211,9 +1384,19 @@ def write_native_reel_redesign_reports(
         f"- scene_variety_score: {payload['scene_variety_score']}",
         f"- ai_slideshow_risk_score: {payload['ai_slideshow_risk_score']}",
         f"- cover_quality_score: {payload['cover_quality_score']}",
+        f"- professional_edit_score: {payload['professional_edit_score']}",
+        f"- viral_readiness_score: {payload['viral_readiness_score']}",
+        f"- visual_polish_score: {payload['visual_polish_score']}",
+        f"- edit_rhythm_score: {payload['edit_rhythm_score']}",
+        f"- duration_sync_ok: {str(payload['duration_sync_ok']).lower()}",
+        f"- subtitles_burned_in: {str(payload['subtitles_burned_in']).lower()}",
+        f"- video_duration_seconds: {payload['video_duration_seconds']}",
+        f"- voiceover_duration_seconds: {payload['voiceover_duration_seconds']}",
+        f"- sanitizer_damage_risk: {payload['sanitizer_damage_risk']}",
         f"- voiceover_status: {payload['voiceover_status']}",
         f"- reel_mp4_path: {payload['reel_mp4_path']}",
         f"- reel_with_voice_mp4_path: {payload['reel_with_voice_mp4_path']}",
+        f"- reel_with_voice_subtitled_path: {payload['reel_with_voice_subtitled_path']}",
         f"- cover_jpg_path: {payload['cover_jpg_path']}",
         f"- voiceover_script_path: {payload['voiceover_script_path']}",
         f"- human_should_post: {str(payload['human_should_post']).lower()}",
@@ -1226,6 +1409,35 @@ def write_native_reel_redesign_reports(
     readiness_name = "ready_to_post_report" if publish_ready else "not_ready_report"
     (qa_dir / f"{readiness_name}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     (qa_dir / f"{readiness_name}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for report_name in ("professional_reel_edit_report", "reel_editor_upgrade_report"):
+        report_payload = {**payload, "report_path": str(qa_dir / f"{report_name}.md")}
+        (qa_dir / f"{report_name}.json").write_text(
+            json.dumps(report_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        report_lines = list(lines)
+        report_lines[0] = "# " + report_name.replace("_", " ").title()
+        (qa_dir / f"{report_name}.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    root_qa_dir = output_root_qa_dir(output_dir)
+    if root_qa_dir != qa_dir:
+        root_qa_dir.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "native_reel_redesign_report",
+            readiness_name,
+            "professional_reel_edit_report",
+            "reel_editor_upgrade_report",
+        ):
+            for suffix in ("json", "md"):
+                source = qa_dir / f"{name}.{suffix}"
+                if source.exists():
+                    shutil.copyfile(source, root_qa_dir / source.name)
+
+
+def output_root_qa_dir(output_dir: Path) -> Path:
+    for parent in [output_dir, *output_dir.parents]:
+        if parent.name == "outputs":
+            return parent / "qa"
+    return output_dir / "qa"
 
 
 def reel_export_metadata(result: object, requested: bool) -> dict[str, object]:

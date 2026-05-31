@@ -21,6 +21,9 @@ class SanitizedSlide:
     output_path: str
     sanitized: bool
     suspicion_score: float
+    sanitizer_area_ratio: float = 0.0
+    sanitizer_visual_damage_risk: str = "low"
+    false_positive_suspected: bool = False
     actions: list[str] = field(default_factory=list)
     features: dict[str, int] = field(default_factory=dict)
 
@@ -52,14 +55,21 @@ def sanitize_post_images(plan: CarouselPlan, raw_dir: Path, sanitized_dir: Path)
         suspicion_score, features = bottom_artifact_suspicion(image)
         actions: list[str] = []
         sanitized = False
-        if suspicion_score >= 40.0:
+        area_ratio = 0.0
+        false_positive = _false_positive_suspected(suspicion_score, features)
+        if suspicion_score >= 40.0 and not false_positive:
             image = protect_bottom_band(image)
             image.save(output_path, "JPEG", quality=94, optimize=True)
             sanitized = True
-            actions = ["bottom_band_blur", "bottom_cinematic_matte", "bottom_gradient_darken"]
+            area_ratio = targeted_sanitizer_area_ratio(image)
+            actions = ["targeted_lower_watermark_soft_blur", "local_soft_gradient"]
+            if area_ratio > 0.20:
+                actions.append("warning_modified_more_than_20_percent")
         else:
             image.save(output_path, "JPEG", quality=94, optimize=True)
             actions = ["raw_copy_no_sanitization_needed"]
+            if false_positive:
+                actions.append("false_positive_suspected")
 
         slides.append(
             SanitizedSlide(
@@ -68,6 +78,9 @@ def sanitize_post_images(plan: CarouselPlan, raw_dir: Path, sanitized_dir: Path)
                 output_path=str(output_path),
                 sanitized=sanitized,
                 suspicion_score=round(suspicion_score, 2),
+                sanitizer_area_ratio=round(area_ratio, 4),
+                sanitizer_visual_damage_risk=sanitizer_visual_damage_risk(area_ratio),
+                false_positive_suspected=false_positive,
                 actions=actions,
                 features=features,
             )
@@ -79,10 +92,24 @@ def sanitize_post_images(plan: CarouselPlan, raw_dir: Path, sanitized_dir: Path)
         for slide in slides
         if Path(slide.output_path).exists()
     ]
+    area_by_slide = {slide.slide_key: slide.sanitizer_area_ratio for slide in slides}
+    max_area_ratio = max(area_by_slide.values(), default=0.0)
+    damage_risk = sanitizer_visual_damage_risk(max_area_ratio)
     return {
         "sanitized_images_used": bool(available_slides),
         "sanitized_slides": sanitized_slides,
         "sanitized_available_slides": available_slides,
+        "sanitizer_area_ratio": round(max_area_ratio, 4),
+        "sanitizer_area_ratio_per_slide": area_by_slide,
+        "sanitizer_visual_damage_risk": damage_risk,
+        "sanitizer_visual_damage_risk_per_slide": {
+            slide.slide_key: slide.sanitizer_visual_damage_risk for slide in slides
+        },
+        "false_positive_suspected": any(slide.false_positive_suspected for slide in slides),
+        "false_positive_suspected_per_slide": {
+            slide.slide_key: slide.false_positive_suspected for slide in slides
+        },
+        "qa_sensitivity_level": "reduced_targeted",
         "sanitizer_actions_per_slide": {slide.slide_key: slide.actions for slide in slides},
         "sanitizer_suspicion_score_per_slide": {
             slide.slide_key: slide.suspicion_score for slide in slides
@@ -121,20 +148,42 @@ def bottom_artifact_suspicion(image: Image.Image) -> tuple[float, dict[str, int]
 
 
 def protect_bottom_band(image: Image.Image) -> Image.Image:
-    """Blur and darken only the lower band where generated text/watermarks tend to appear."""
+    """Softly treat the likely lower watermark strip without obscuring the whole bottom half."""
 
     rgba = image.convert("RGBA")
     width, height = rgba.size
-    band_top = int(height * BOTTOM_ZONE_START)
-    band = rgba.crop((0, band_top, width, height)).filter(ImageFilter.GaussianBlur(radius=10))
-    dark = Image.new("RGBA", band.size, (0, 0, 0, 112))
+    band_top = int(height * 0.82)
+    side_margin = int(width * 0.08)
+    band = rgba.crop((side_margin, band_top, width - side_margin, height)).filter(ImageFilter.GaussianBlur(radius=4))
+    dark = Image.new("RGBA", band.size, (0, 0, 0, 36))
     band = Image.alpha_composite(band, dark)
-    rgba.alpha_composite(band, (0, band_top))
+    rgba.alpha_composite(band, (side_margin, band_top))
 
     gradient = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(gradient)
-    for y in range(band_top - 90, height):
-        progress = (y - (band_top - 90)) / max(1, height - (band_top - 90))
-        alpha = int(18 + 172 * max(0.0, min(1.0, progress)) ** 1.35)
-        draw.line((0, y, width, y), fill=(0, 0, 0, min(190, alpha)))
+    for y in range(max(0, band_top - 44), height):
+        progress = (y - (band_top - 44)) / max(1, height - (band_top - 44))
+        alpha = int(6 + 42 * max(0.0, min(1.0, progress)) ** 1.4)
+        draw.line((side_margin, y, width - side_margin, y), fill=(0, 0, 0, min(54, alpha)))
     return Image.alpha_composite(rgba, gradient).convert("RGB")
+
+
+def targeted_sanitizer_area_ratio(image: Image.Image) -> float:
+    width, height = image.size
+    changed_width = width * 0.84
+    changed_height = height * 0.18
+    return (changed_width * changed_height) / max(1, width * height)
+
+
+def sanitizer_visual_damage_risk(area_ratio: float) -> str:
+    if area_ratio > 0.20:
+        return "high"
+    if area_ratio > 0.12:
+        return "medium"
+    return "low"
+
+
+def _false_positive_suspected(suspicion_score: float, features: dict[str, int]) -> bool:
+    has_text_band = features.get("bottom_long_text_components", 0) >= 1 or features.get("bottom_components", 0) >= 8
+    edge_only = features.get("lower_band_edge_score", 0) >= 44 and not has_text_band
+    return 40.0 <= suspicion_score < 70.0 and edge_only

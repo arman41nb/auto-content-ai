@@ -127,6 +127,10 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         first_second_hook_score = int(native_reel_quality.get("first_second_hook_score", 0) or 0)
         scene_variety_score = int(native_reel_quality.get("scene_variety_score", 0) or 0)
         ai_slideshow_risk_score = int(native_reel_quality.get("ai_slideshow_risk_score", 100))
+        visual_polish_score = int(native_reel_quality.get("visual_polish_score", 100) or 0)
+        edit_rhythm_score = int(native_reel_quality.get("edit_rhythm_score", 100) or 0)
+        perceived_template_risk = int(native_reel_quality.get("perceived_template_risk", ai_slideshow_risk_score) or 0)
+        viral_readiness_score = int(native_reel_quality.get("viral_readiness_score", native_reel_score) or 0)
         if native_reel_score < 75:
             blocking.append(f"Native Reel score is below publish threshold: {native_reel_score}.")
             score -= 18
@@ -139,6 +143,18 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         if ai_slideshow_risk_score > 60:
             blocking.append(f"AI slideshow risk is too high: {ai_slideshow_risk_score}.")
             score -= 16
+        if visual_polish_score < 75:
+            blocking.append(f"Native Reel visual polish score is below publish threshold: {visual_polish_score}.")
+            score -= 8
+        if edit_rhythm_score < 75:
+            blocking.append(f"Native Reel edit rhythm score is below publish threshold: {edit_rhythm_score}.")
+            score -= 8
+        if perceived_template_risk > 60:
+            blocking.append(f"Native Reel perceived template risk is too high: {perceived_template_risk}.")
+            score -= 8
+        if viral_readiness_score < 75:
+            blocking.append(f"Native Reel viral readiness score is below publish threshold: {viral_readiness_score}.")
+            score -= 8
         for issue in _string_list(native_reel_quality.get("blocking_issues", [])):
             blocking.append(issue)
 
@@ -185,6 +201,18 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
             if isinstance(native_reel_quality, dict)
             else 0,
             "cover_quality_score": native_reel_quality.get("cover_quality_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "professional_edit_score": native_reel_quality.get("professional_edit_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "viral_readiness_score": native_reel_quality.get("viral_readiness_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "visual_polish_score": native_reel_quality.get("visual_polish_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "edit_rhythm_score": native_reel_quality.get("edit_rhythm_score", 0)
             if isinstance(native_reel_quality, dict)
             else 0,
             **voiceover_check,
@@ -338,13 +366,27 @@ def _voiceover_quality_report(output_dir: Path, metadata: dict[str, Any]) -> dic
     reel_with_voice_path = Path(
         str(voiceover_dict.get("reel_with_voice_path") or output_dir / "final_reel" / "reel_with_voice.mp4")
     )
+    subtitled_path = Path(
+        str(
+            voiceover_dict.get("reel_with_voice_subtitled_path")
+            or voiceover_dict.get("subtitled_video_path")
+            or output_dir / "final_reel" / "reel_with_voice_subtitled.mp4"
+        )
+    )
+    srt_path = Path(str(voiceover_dict.get("subtitles_srt_path") or output_dir / "voiceover" / "subtitles.srt"))
+    ass_path = Path(str(voiceover_dict.get("subtitles_ass_path") or output_dir / "voiceover" / "subtitles.ass"))
 
     mux_probe = _ffprobe_stream_summary(reel_with_voice_path)
     tts_probe = _ffprobe_stream_summary(tts_path)
     audio_stream = mux_probe["audio_stream"]
+    video_stream = mux_probe["video_stream"]
     audio_duration = float(tts_probe["audio_duration_seconds"] or audio_stream.get("duration_seconds", 0.0) or 0.0)
+    video_duration = float(video_stream.get("duration_seconds", 0.0) or mux_probe.get("format_duration_seconds", 0.0) or 0.0)
     audio_codec = str(audio_stream.get("codec_name", ""))
     has_audio_stream = bool(audio_stream)
+    subtitled_probe = _ffprobe_stream_summary(subtitled_path)
+    subtitled_has_audio = bool(subtitled_probe.get("audio_stream", {}))
+    subtitles_created = srt_path.exists() and ass_path.exists()
 
     warnings: list[str] = []
     blockers: list[str] = []
@@ -361,6 +403,16 @@ def _voiceover_quality_report(output_dir: Path, metadata: dict[str, Any]) -> dic
             blockers.append("Voiceover audio duration is empty or near-zero.")
         elif audio_duration and not 3.0 <= audio_duration <= 25.0:
             warnings.append(f"Voiceover duration may be unusual: {audio_duration:.2f}s.")
+        if audio_duration and video_duration and video_duration + 0.05 < audio_duration:
+            blockers.append(
+                f"Voiceover is longer than video ({audio_duration:.2f}s audio vs {video_duration:.2f}s video)."
+            )
+        if not subtitles_created:
+            blockers.append("Voiceover was requested but subtitle files are missing.")
+        if not subtitled_path.exists():
+            blockers.append("Voiceover was requested but reel_with_voice_subtitled.mp4 is missing.")
+        elif not subtitled_has_audio:
+            blockers.append("Voiceover was requested but subtitled Reel has no audio stream.")
 
     score = 100
     if requested:
@@ -382,7 +434,14 @@ def _voiceover_quality_report(output_dir: Path, metadata: dict[str, Any]) -> dic
         "voiceover_audio_stream_present": has_audio_stream,
         "voiceover_audio_codec": audio_codec,
         "voiceover_duration_seconds": round(audio_duration, 3),
+        "voiceover_video_duration_seconds": round(video_duration, 3),
+        "duration_sync_ok": not requested or not audio_duration or (video_duration + 0.05 >= audio_duration),
+        "duration_mismatch_seconds": round(max(0.0, audio_duration - video_duration), 3),
         "reel_with_voice_path": str(reel_with_voice_path),
+        "reel_with_voice_subtitled_path": str(subtitled_path),
+        "subtitles_created": subtitles_created,
+        "subtitles_burned_in": subtitled_path.exists() and subtitled_has_audio,
+        "subtitle_sync_ok": subtitles_created and subtitled_path.exists() and (not audio_duration or video_duration + 0.05 >= audio_duration),
         "voiceover_quality_score": score,
         "voiceover_warnings": _dedupe(warnings),
         "voiceover_blocking_issues": _dedupe(blockers),

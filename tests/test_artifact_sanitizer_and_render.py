@@ -9,7 +9,13 @@ from PIL import Image, ImageDraw, ImageStat
 from app.content.schemas import CarouselPlan, CarouselSlide
 from app.image.prompt_builder import build_image_prompt
 from app.image.quality import score_candidate
-from app.image.sanitizer import bottom_artifact_suspicion, protect_bottom_band, sanitize_post_images
+from app.image.sanitizer import (
+    bottom_artifact_suspicion,
+    protect_bottom_band,
+    sanitize_post_images,
+    sanitizer_visual_damage_risk,
+    targeted_sanitizer_area_ratio,
+)
 from app.render.carousel_renderer import CarouselRenderer
 from app.render.reel_exporter import export_reel_package
 
@@ -69,7 +75,9 @@ class ArtifactSanitizerRenderTests(unittest.TestCase):
         after = ImageStat.Stat(cleaned.crop((0, 650, 686, 858)).convert("L")).mean[0]
 
         self.assertGreaterEqual(suspicion, 40.0)
-        self.assertLess(after, before - 15)
+        self.assertLess(after, before)
+        self.assertLessEqual(targeted_sanitizer_area_ratio(cleaned), 0.20)
+        self.assertEqual(sanitizer_visual_damage_risk(targeted_sanitizer_area_ratio(cleaned)), "medium")
 
     def test_intentional_rendered_overlay_text_is_not_raw_artifact_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -132,6 +140,11 @@ class ArtifactSanitizerRenderTests(unittest.TestCase):
 
         self.assertTrue(report["sanitized_images_used"])
         self.assertIn("slide_01", report["sanitized_slides"])
+        self.assertLessEqual(report["sanitizer_area_ratio"], 0.20)
+        self.assertIn(report["sanitizer_visual_damage_risk"], {"low", "medium"})
+
+    def test_large_area_sanitizer_ratio_is_high_damage(self) -> None:
+        self.assertEqual(sanitizer_visual_damage_risk(0.21), "high")
 
 
 if __name__ == "__main__":

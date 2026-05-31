@@ -44,6 +44,28 @@ def run_native_reel_quality_gate(
         metadata=metadata,
     )
     voiceover_quality_score = _voiceover_quality_score(metadata, reel_plan, voiceover_requested)
+    duration_sync_score = _duration_sync_score(metadata, voiceover_requested)
+    subtitle_quality_score = _subtitle_quality_score(metadata, voiceover_requested)
+    edit_rhythm_score = _edit_rhythm_score(metadata)
+    motion_professionalism_score = motion_quality_score
+    sanitizer_damage_score = _sanitizer_damage_score(metadata)
+    visual_polish_score = round(
+        cover_quality_score * 0.22
+        + text_minimalism_score * 0.18
+        + motion_quality_score * 0.22
+        + scene_variety_score * 0.18
+        + sanitizer_damage_score * 0.20
+    )
+    perceived_template_risk = _perceived_template_risk(ai_slideshow_risk_score, motion_quality_score, edit_rhythm_score)
+    viral_readiness_score = round(
+        first_second_hook_score * 0.18
+        + visual_polish_score * 0.22
+        + edit_rhythm_score * 0.18
+        + motion_professionalism_score * 0.14
+        + duration_sync_score * 0.14
+        + subtitle_quality_score * 0.14
+        - max(0, perceived_template_risk - 45) * 0.12
+    )
 
     native_reel_score = round(
         first_second_hook_score * 0.18
@@ -76,6 +98,20 @@ def run_native_reel_quality_gate(
         blockers.append("On-screen text is too long or too visually dominant.")
     if image_artifact_risk >= 70:
         blockers.append(f"Obvious AI text/watermark risk remains: {image_artifact_risk:.1f}.")
+    if voiceover_requested and duration_sync_score < 100:
+        blockers.append("Voiceover is longer than the final video.")
+    if voiceover_requested and subtitle_quality_score < 75:
+        blockers.append("Burned-in subtitles are missing or incomplete.")
+    if visual_polish_score < 75:
+        blockers.append(f"visual_polish_score is below 75: {visual_polish_score}.")
+    if edit_rhythm_score < 75:
+        blockers.append(f"edit_rhythm_score is below 75: {edit_rhythm_score}.")
+    if perceived_template_risk > 60:
+        blockers.append(f"perceived_template_risk is above 60: {perceived_template_risk}.")
+    if viral_readiness_score < 75:
+        blockers.append(f"viral_readiness_score is below 75: {viral_readiness_score}.")
+    if str(metadata.get("sanitizer_visual_damage_risk", "low")) == "high":
+        blockers.append("Sanitizer visual damage risk is high.")
 
     publish_ready = not blockers
     report = {
@@ -89,8 +125,27 @@ def run_native_reel_quality_gate(
         "ai_slideshow_risk_score": ai_slideshow_risk_score,
         "cover_quality_score": cover_quality_score,
         "voiceover_quality_score": voiceover_quality_score,
+        "duration_sync_score": duration_sync_score,
+        "subtitle_quality_score": subtitle_quality_score,
+        "edit_rhythm_score": edit_rhythm_score,
+        "motion_professionalism_score": motion_professionalism_score,
+        "visual_polish_score": visual_polish_score,
+        "sanitizer_damage_score": sanitizer_damage_score,
+        "perceived_template_risk": perceived_template_risk,
+        "viral_readiness_score": viral_readiness_score,
+        "professional_edit_score": round(
+            visual_polish_score * 0.34
+            + edit_rhythm_score * 0.24
+            + motion_professionalism_score * 0.20
+            + subtitle_quality_score * 0.12
+            + duration_sync_score * 0.10
+        ),
         "voiceover_requested": voiceover_requested,
         "voiceover_created": _voiceover_created(metadata),
+        "duration_sync_ok": duration_sync_score == 100,
+        "subtitles_required": voiceover_requested,
+        "subtitles_created": _subtitles_created(metadata),
+        "subtitles_burned_in": _subtitles_burned_in(metadata),
         "cover_native_1080x1920": cover_native,
         "reel_native_1080x1920": reel_native,
         "frames_native_1080x1920": frame_dimensions_ok,
@@ -126,6 +181,11 @@ def write_native_reel_quality_report(output_dir: Path, report: dict[str, Any]) -
         f"- ai_slideshow_risk_score: {report['ai_slideshow_risk_score']}",
         f"- cover_quality_score: {report['cover_quality_score']}",
         f"- voiceover_quality_score: {report['voiceover_quality_score']}",
+        f"- duration_sync_score: {report['duration_sync_score']}",
+        f"- subtitle_quality_score: {report['subtitle_quality_score']}",
+        f"- edit_rhythm_score: {report['edit_rhythm_score']}",
+        f"- visual_polish_score: {report['visual_polish_score']}",
+        f"- viral_readiness_score: {report['viral_readiness_score']}",
         f"- reel_path: {report['reel_path']}",
         f"- cover_path: {report['cover_path']}",
         "",
@@ -245,6 +305,73 @@ def _voiceover_quality_score(metadata: dict[str, Any], reel_plan: ReelPlan, requ
     return min(100, score)
 
 
+def _duration_sync_score(metadata: dict[str, Any], requested: bool) -> int:
+    if not requested:
+        return 100
+    voiceover = metadata.get("voiceover", {})
+    native = metadata.get("native_reel_render", {})
+    voice_dict = voiceover if isinstance(voiceover, dict) else {}
+    native_dict = native if isinstance(native, dict) else {}
+    duration_sync_ok = bool(voice_dict.get("duration_sync_ok") or native_dict.get("duration_sync_ok"))
+    audio = float(voice_dict.get("voiceover_duration_seconds", native_dict.get("voiceover_duration_seconds", 0.0)) or 0.0)
+    video = float(voice_dict.get("final_video_duration_seconds", native_dict.get("final_video_duration_seconds", 0.0)) or 0.0)
+    if duration_sync_ok or (audio and video and video + 0.05 >= audio):
+        return 100
+    if audio and video:
+        return max(0, round(100 - max(0.0, audio - video) * 18))
+    return 35
+
+
+def _subtitle_quality_score(metadata: dict[str, Any], requested: bool) -> int:
+    if not requested:
+        return 100
+    if _subtitles_burned_in(metadata):
+        return 94
+    if _subtitles_created(metadata):
+        return 62
+    return 0
+
+
+def _edit_rhythm_score(metadata: dict[str, Any]) -> int:
+    native = metadata.get("native_reel_render", {})
+    native_dict = native if isinstance(native, dict) else {}
+    durations = native_dict.get("scene_durations", [])
+    if not isinstance(durations, list) or not durations:
+        return 62
+    values = [float(value) for value in durations if float(value or 0) > 0]
+    if not values:
+        return 62
+    score = 88
+    if min(values) < 1.4:
+        score -= 30
+    if max(values) > 6.5:
+        score -= 10
+    if len(values) == 5:
+        score += 6
+    strategy = str(native_dict.get("scene_duration_strategy", ""))
+    if "voiceover_word_count" in strategy:
+        score += 6
+    return max(0, min(100, score))
+
+
+def _sanitizer_damage_score(metadata: dict[str, Any]) -> int:
+    risk = str(metadata.get("sanitizer_visual_damage_risk", "low"))
+    if risk == "high":
+        return 30
+    if risk == "medium":
+        return 72
+    return 96
+
+
+def _perceived_template_risk(ai_slideshow_risk_score: int, motion_quality_score: int, edit_rhythm_score: int) -> int:
+    risk = ai_slideshow_risk_score
+    if motion_quality_score >= 90:
+        risk -= 8
+    if edit_rhythm_score >= 88:
+        risk -= 8
+    return max(0, min(100, risk))
+
+
 def _ai_slideshow_risk_score(
     motion_quality_score: int,
     scene_variety_score: int,
@@ -307,6 +434,22 @@ def _fast_artifact_risk(path: Path) -> float:
 def _voiceover_created(metadata: dict[str, Any]) -> bool:
     voiceover = metadata.get("voiceover", {})
     return isinstance(voiceover, dict) and bool(voiceover.get("tts_created"))
+
+
+def _subtitles_created(metadata: dict[str, Any]) -> bool:
+    voiceover = metadata.get("voiceover", {})
+    native = metadata.get("native_reel_render", {})
+    return (
+        isinstance(voiceover, dict)
+        and bool(voiceover.get("subtitles_created"))
+        or isinstance(native, dict)
+        and bool(native.get("subtitles_created"))
+    )
+
+
+def _subtitles_burned_in(metadata: dict[str, Any]) -> bool:
+    voiceover = metadata.get("voiceover", {})
+    return isinstance(voiceover, dict) and bool(voiceover.get("subtitles_burned_in"))
 
 
 def _video_looks_carousel_pasted(metadata: dict[str, Any]) -> bool:
