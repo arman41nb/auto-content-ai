@@ -169,7 +169,7 @@ def native_reel_plan_for_topic(
 ) -> ReelPlan:
     """Return a deterministic native Reel story plan for a selected topic."""
 
-    normalized_topic = " ".join(topic.strip().split()) or "What if oceans rose overnight?"
+    normalized_topic = " ".join(topic.strip().split()) or "What if gravity doubled for one day?"
     if normalized_topic.lower() == "what if oceans rose overnight?":
         return deterministic_ocean_reel_plan(niche)
 
@@ -179,6 +179,7 @@ def native_reel_plan_for_topic(
     scenario = _scenario_words(subject, lane)
     visual_base = _visual_base(subject, lane, angle)
     voice_subject = _voice_subject(subject)
+    hook_voiceover = normalized_topic if normalized_topic.lower().startswith("what if") else f"What if {voice_subject} changed?"
 
     return ReelPlan(
         topic=normalized_topic,
@@ -190,7 +191,7 @@ def native_reel_plan_for_topic(
                 scene_number=1,
                 duration_seconds=2.0,
                 on_screen_text=_short_text(subject, "CHANGES"),
-                voiceover_line=f"What if {voice_subject} changed overnight?",
+                voiceover_line=hook_voiceover,
                 visual_prompt=(
                     f"{visual_base}, immediate wide establishing shot, visible shock in the first second, "
                     "cinematic documentary realism, no text, no signs, no logos, no watermark, no typography"
@@ -310,7 +311,16 @@ def _scenario_words(subject: str, lane: str) -> dict[str, str]:
             "text_4": "SECONDS MATTER",
             "voice_4": "The danger is measured in seconds, not hours.",
         }
-    if any(word in lower for word in ("moon", "gravity", "black hole")):
+    if "gravity doubled" in lower or "gravity" in lower:
+        return {
+            "text_2": "BODIES GET HEAVY",
+            "voice_2": "First, every body becomes harder to move.",
+            "text_3": "STRUCTURES FAIL",
+            "voice_3": "Then stairs, bridges, and old buildings start failing.",
+            "text_4": "NO EASY EXIT",
+            "voice_4": "The trap is invisible until every step costs more.",
+        }
+    if any(word in lower for word in ("moon", "black hole")):
         return {
             "text_2": "TIDES SURGE",
             "voice_2": "First, oceans and bodies feel the force.",

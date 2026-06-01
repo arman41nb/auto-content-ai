@@ -50,7 +50,7 @@ ffmpeg -version
 ```
 
 If the system command is unavailable, the app falls back to `imageio-ffmpeg`.
-Voiceover uses `edge-tts` when installed and writes `voiceover/voiceover_script.txt` even if TTS fails.
+Voiceover uses `edge-tts` when installed and writes `voiceover/voiceover_script.txt` even if TTS fails. Native Reel voiceover also asks edge-tts for `voiceover/voiceover_raw.srt` so kinetic captions can be timed from the same synthesis request.
 
 ## Example Commands
 
@@ -66,13 +66,13 @@ Run discovery, generation, carousel rendering, and Reel export:
 python -m app.main auto --niche science --lane any --count 1 --sources static --handle "@yourpage" --image-variants 3 --rate-limit 25 --llm-provider auto --make-reel
 ```
 
-Generate the deterministic native Reel benchmark:
+Generate a native Reel story with synced kinetic captions:
 
 ```bash
 python -m app.main auto --niche science --lane any --count 1 --sources static --handle "@yourpage" --image-variants 3 --rate-limit 25 --llm-provider auto --make-reel --template native_reel_story --voiceover
 ```
 
-Native Reel outputs include `final_reel/reel.mp4`, `final_reel/cover.jpg`, `final_reel/frames/frame_01.jpg` through `frame_05.jpg`, `reel_plan.json`, and voiceover assets when requested.
+Native Reel outputs include `final_reel/reel.mp4`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/reel_with_voice_subtitled.mp4`, `final_reel/cover.jpg`, `final_reel/edit_beats.json`, `final_reel/scene_timing.json`, `final_reel/frames/frame_01.jpg` through `frame_05.jpg`, `reel_plan.json`, and voiceover timing assets when requested.
 
 Re-render an existing package without calling an LLM or image provider:
 

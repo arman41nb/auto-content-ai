@@ -10,10 +10,11 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from app.content.reel_schemas import deterministic_ocean_reel_plan, reel_plan_to_carousel_plan
+from app.content.reel_schemas import deterministic_ocean_reel_plan, native_reel_plan_for_topic, reel_plan_to_carousel_plan
 from app.main import build_parser, build_voiceover_script, generate, write_voiceover_assets
 from app.quality.native_reel_quality import run_native_reel_quality_gate
 from app.quality.post_quality_gate import run_post_quality_gate
+from app.render.kinetic_captions import build_caption_timing_from_srt, caption_quality_metrics
 from app.render.media_utils import audio_duration_seconds, video_duration_seconds
 from app.render.native_reel_renderer import NativeReelRenderResult, _scene_durations_for_voiceover, export_native_reel_story
 
@@ -96,6 +97,54 @@ class NativeReelStoryTests(unittest.TestCase):
         self.assertGreaterEqual(sum(durations), 20.252)
         self.assertTrue(all(duration >= 1.4 for duration in durations))
         self.assertGreater(durations[-1], reel_plan.scenes[-1].duration_seconds)
+
+    def test_caption_timing_uses_edge_tts_srt_source_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            voiceover_dir = root / "voiceover"
+            voiceover_dir.mkdir()
+            raw_srt = voiceover_dir / "voiceover_raw.srt"
+            raw_srt.write_text(
+                "1\n00:00:00,000 --> 00:00:01,200\nWhat if gravity doubled\n\n"
+                "2\n00:00:01,200 --> 00:00:02,400\nfor one day?\n",
+                encoding="utf-8",
+            )
+            timing = build_caption_timing_from_srt(
+                native_reel_plan_for_topic("What if gravity doubled for one day?"),
+                raw_srt,
+                voiceover_dir,
+                fallback_duration_seconds=2.5,
+            )
+            caption_segments_path_exists = Path(str(timing["caption_segments_path"])).exists()
+
+        self.assertTrue(timing["tts_timing_used"])
+        self.assertTrue(caption_segments_path_exists)
+        self.assertGreater(len(timing["caption_segments"]), 0)
+        self.assertIn("words", timing["caption_segments"][0])
+
+    def test_caption_quality_metrics_require_tts_source_for_high_sync(self) -> None:
+        caption_segments = [
+            {
+                "start": 0.0,
+                "end": 0.8,
+                "text": "What if gravity",
+                "words": [{"word": "What", "start": 0.0, "end": 0.2, "emphasis": False}],
+            }
+        ]
+
+        real = caption_quality_metrics(True, caption_segments)
+        guessed = caption_quality_metrics(False, caption_segments)
+
+        self.assertGreaterEqual(real["caption_sync_score"], 80)
+        self.assertLess(guessed["caption_sync_score"], 80)
+        self.assertTrue(real["active_word_highlight_used"])
+
+    def test_non_ocean_native_topic_does_not_inject_overnight_benchmark(self) -> None:
+        plan = native_reel_plan_for_topic("What if gravity doubled for one day?", "science")
+
+        self.assertEqual(plan.topic, "What if gravity doubled for one day?")
+        self.assertIn("gravity doubled", plan.voiceover_script.lower())
+        self.assertNotIn("oceans rose overnight", plan.voiceover_script.lower())
 
     def test_native_quality_blocks_carousel_paste_without_native_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

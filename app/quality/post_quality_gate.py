@@ -129,6 +129,11 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         ai_slideshow_risk_score = int(native_reel_quality.get("ai_slideshow_risk_score", 100))
         visual_polish_score = int(native_reel_quality.get("visual_polish_score", 100) or 0)
         edit_rhythm_score = int(native_reel_quality.get("edit_rhythm_score", 100) or 0)
+        caption_sync_score = int(native_reel_quality.get("caption_sync_score", 100) or 0)
+        kinetic_caption_score = int(native_reel_quality.get("kinetic_caption_score", 100) or 0)
+        caption_readability_score = int(native_reel_quality.get("caption_readability_score", 100) or 0)
+        scene_cut_on_phrase_boundary_score = int(native_reel_quality.get("scene_cut_on_phrase_boundary_score", 100) or 0)
+        sanitizer_damage_risk = str(native_reel_quality.get("sanitizer_damage_risk", metadata.get("sanitizer_visual_damage_risk", "low")))
         perceived_template_risk = int(native_reel_quality.get("perceived_template_risk", ai_slideshow_risk_score) or 0)
         viral_readiness_score = int(native_reel_quality.get("viral_readiness_score", native_reel_score) or 0)
         if native_reel_score < 75:
@@ -149,6 +154,21 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         if edit_rhythm_score < 75:
             blocking.append(f"Native Reel edit rhythm score is below publish threshold: {edit_rhythm_score}.")
             score -= 8
+        if caption_sync_score < 80:
+            blocking.append(f"Native Reel caption sync score is below publish threshold: {caption_sync_score}.")
+            score -= 12
+        if kinetic_caption_score < 75:
+            blocking.append(f"Native Reel kinetic caption score is below publish threshold: {kinetic_caption_score}.")
+            score -= 10
+        if caption_readability_score < 75:
+            blocking.append(f"Native Reel caption readability score is below publish threshold: {caption_readability_score}.")
+            score -= 8
+        if scene_cut_on_phrase_boundary_score < 75:
+            blocking.append("Native Reel scene cuts are not aligned to phrase boundaries.")
+            score -= 8
+        if sanitizer_damage_risk == "high":
+            blocking.append("Native Reel sanitizer damage risk is high.")
+            score -= 12
         if perceived_template_risk > 60:
             blocking.append(f"Native Reel perceived template risk is too high: {perceived_template_risk}.")
             score -= 8
@@ -215,6 +235,27 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
             "edit_rhythm_score": native_reel_quality.get("edit_rhythm_score", 0)
             if isinstance(native_reel_quality, dict)
             else 0,
+            "caption_sync_score": native_reel_quality.get("caption_sync_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "kinetic_caption_score": native_reel_quality.get("kinetic_caption_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "caption_readability_score": native_reel_quality.get("caption_readability_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "active_word_highlight_used": native_reel_quality.get("active_word_highlight_used", False)
+            if isinstance(native_reel_quality, dict)
+            else False,
+            "caption_style": native_reel_quality.get("caption_style", "")
+            if isinstance(native_reel_quality, dict)
+            else "",
+            "scene_cut_on_phrase_boundary_score": native_reel_quality.get("scene_cut_on_phrase_boundary_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "sanitizer_damage_risk": native_reel_quality.get("sanitizer_damage_risk", metadata.get("sanitizer_visual_damage_risk", "low"))
+            if isinstance(native_reel_quality, dict)
+            else metadata.get("sanitizer_visual_damage_risk", "low"),
             **voiceover_check,
             **design,
         },
@@ -242,6 +283,11 @@ def write_post_quality_report(output_dir: Path, report: PostQualityReport) -> No
         f"- scene_variety_score: {report.details.get('scene_variety_score', 0)}",
         f"- ai_slideshow_risk_score: {report.details.get('ai_slideshow_risk_score', 0)}",
         f"- cover_quality_score: {report.details.get('cover_quality_score', 0)}",
+        f"- caption_sync_score: {report.details.get('caption_sync_score', 0)}",
+        f"- kinetic_caption_score: {report.details.get('kinetic_caption_score', 0)}",
+        f"- caption_readability_score: {report.details.get('caption_readability_score', 0)}",
+        f"- active_word_highlight_used: {str(report.details.get('active_word_highlight_used', False)).lower()}",
+        f"- caption_style: {report.details.get('caption_style', '')}",
         f"- voiceover_requested: {str(report.details.get('voiceover_requested', False)).lower()}",
         f"- voiceover_ready: {str(report.details.get('voiceover_ready', False)).lower()}",
         f"- voiceover_audio_stream_present: {str(report.details.get('voiceover_audio_stream_present', False)).lower()}",
@@ -373,6 +419,12 @@ def _voiceover_quality_report(output_dir: Path, metadata: dict[str, Any]) -> dic
             or output_dir / "final_reel" / "reel_with_voice_subtitled.mp4"
         )
     )
+    kinetic_path = Path(
+        str(
+            voiceover_dict.get("reel_with_voice_kinetic_subtitles_path")
+            or output_dir / "final_reel" / "reel_with_voice_kinetic_subtitles.mp4"
+        )
+    )
     srt_path = Path(str(voiceover_dict.get("subtitles_srt_path") or output_dir / "voiceover" / "subtitles.srt"))
     ass_path = Path(str(voiceover_dict.get("subtitles_ass_path") or output_dir / "voiceover" / "subtitles.ass"))
 
@@ -413,6 +465,8 @@ def _voiceover_quality_report(output_dir: Path, metadata: dict[str, Any]) -> dic
             blockers.append("Voiceover was requested but reel_with_voice_subtitled.mp4 is missing.")
         elif not subtitled_has_audio:
             blockers.append("Voiceover was requested but subtitled Reel has no audio stream.")
+        if voiceover_dict.get("kinetic_subtitles_created") and not kinetic_path.exists():
+            blockers.append("Kinetic subtitle output was expected but is missing.")
 
     score = 100
     if requested:
@@ -439,6 +493,8 @@ def _voiceover_quality_report(output_dir: Path, metadata: dict[str, Any]) -> dic
         "duration_mismatch_seconds": round(max(0.0, audio_duration - video_duration), 3),
         "reel_with_voice_path": str(reel_with_voice_path),
         "reel_with_voice_subtitled_path": str(subtitled_path),
+        "reel_with_voice_kinetic_subtitles_path": str(kinetic_path),
+        "kinetic_subtitles_created": kinetic_path.exists(),
         "subtitles_created": subtitles_created,
         "subtitles_burned_in": subtitled_path.exists() and subtitled_has_audio,
         "subtitle_sync_ok": subtitles_created and subtitled_path.exists() and (not audio_duration or video_duration + 0.05 >= audio_duration),

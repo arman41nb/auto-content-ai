@@ -28,9 +28,15 @@ class SanitizedSlide:
     features: dict[str, int] = field(default_factory=dict)
 
 
-def sanitize_post_images(plan: CarouselPlan, raw_dir: Path, sanitized_dir: Path) -> dict[str, object]:
+def sanitize_post_images(
+    plan: CarouselPlan,
+    raw_dir: Path,
+    sanitized_dir: Path,
+    mode: str = "targeted",
+) -> dict[str, object]:
     """Create sanitized copies for raw slides with likely lower-band AI text artifacts."""
 
+    sanitizer_mode = mode if mode in {"off", "light", "targeted", "heavy"} else "targeted"
     sanitized_dir.mkdir(parents=True, exist_ok=True)
     slides: list[SanitizedSlide] = []
     for slide in plan.slides:
@@ -57,7 +63,11 @@ def sanitize_post_images(plan: CarouselPlan, raw_dir: Path, sanitized_dir: Path)
         sanitized = False
         area_ratio = 0.0
         false_positive = _false_positive_suspected(suspicion_score, features)
-        if suspicion_score >= 40.0 and not false_positive:
+        threshold = 55.0 if sanitizer_mode == "light" else 40.0
+        if sanitizer_mode == "off":
+            image.save(output_path, "JPEG", quality=94, optimize=True)
+            actions = ["sanitizer_mode_off_raw_copy"]
+        elif suspicion_score >= threshold and not false_positive:
             image = protect_bottom_band(image)
             image.save(output_path, "JPEG", quality=94, optimize=True)
             sanitized = True
@@ -102,6 +112,8 @@ def sanitize_post_images(plan: CarouselPlan, raw_dir: Path, sanitized_dir: Path)
         "sanitizer_area_ratio": round(max_area_ratio, 4),
         "sanitizer_area_ratio_per_slide": area_by_slide,
         "sanitizer_visual_damage_risk": damage_risk,
+        "sanitizer_mode": sanitizer_mode,
+        "sanitizer_heavy_default": False,
         "sanitizer_visual_damage_risk_per_slide": {
             slide.slide_key: slide.sanitizer_visual_damage_risk for slide in slides
         },

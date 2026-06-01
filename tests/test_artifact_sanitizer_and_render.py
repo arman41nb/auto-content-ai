@@ -142,6 +142,8 @@ class ArtifactSanitizerRenderTests(unittest.TestCase):
         self.assertIn("slide_01", report["sanitized_slides"])
         self.assertLessEqual(report["sanitizer_area_ratio"], 0.20)
         self.assertIn(report["sanitizer_visual_damage_risk"], {"low", "medium"})
+        self.assertEqual(report["sanitizer_mode"], "targeted")
+        self.assertFalse(report["sanitizer_heavy_default"])
 
     def test_large_area_sanitizer_ratio_is_high_damage(self) -> None:
         self.assertEqual(sanitizer_visual_damage_risk(0.21), "high")
