@@ -26,6 +26,11 @@ outputs/tmp*/
 *.mp4
 *.mp3
 *.wav
+*.jpg
+*.jpeg
+*.png
+
+host_assets/
 
 .DS_Store
 Thumbs.db

@@ -14,6 +14,7 @@ Manual review is required before posting. The project does not auto-publish to I
 - Pollinations image generation with multiple image variants.
 - Carousel rendering with Pillow.
 - Native `native_reel_story` output for 1080x1920, five-scene cinematic Reels.
+- Hosted `explainer_host_reel` output with a fictional host, media planning, stock/Wikimedia/chart support, and explainer quality reports.
 - Reel export with FFmpeg or the bundled `imageio-ffmpeg` fallback.
 - Optional `edge-tts` voiceover generation and audio muxing.
 - Quality gate reports for generated post packages.
@@ -38,8 +39,10 @@ Required environment keys are all optional at runtime:
 - `GEMINI_API_KEY` optional
 - `OPENROUTER_API_KEY` optional
 - `CEREBRAS_API_KEY` optional
+- `PEXELS_API_KEY` optional for explainer stock media
+- `UNSPLASH_ACCESS_KEY` optional for explainer stock media
 
-The app skips missing LLM providers in `auto` mode. Discovery can also use `NASA_API_KEY`; if it is empty, the NASA source falls back to public demo access where supported.
+The app skips missing LLM and media providers gracefully. Discovery can also use `NASA_API_KEY`; if it is empty, the NASA source falls back to public demo access where supported.
 
 ## FFmpeg and Voiceover
 
@@ -74,6 +77,14 @@ python -m app.main auto --niche science --lane any --count 1 --sources static --
 
 Native Reel outputs include `final_reel/reel.mp4`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/reel_with_voice_subtitled.mp4`, `final_reel/cover.jpg`, `final_reel/edit_beats.json`, `final_reel/scene_timing.json`, `final_reel/frames/frame_01.jpg` through `frame_05.jpg`, `reel_plan.json`, and voiceover timing assets when requested.
 
+Generate one hosted explainer Reel:
+
+```bash
+python -m app.main generate --topic "What is the relationship between oil prices and the dollar?" --niche economy --slides 5 --handle "@yourpage" --image-variants 2 --rate-limit 20 --llm-provider auto --make-reel --template explainer_host_reel --voiceover
+```
+
+Explainer outputs include `explainer_plan.json`, `media_plan.json`, `media_selection_report.json`, `media_attribution.json`, `explainer_quality_report.md/json`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/cover.jpg`, and QA reports under `outputs/qa`. The fictional default host is Nova (`data/hosts/nova.json`). Host reference assets are generated under `host_assets/` and are ignored by git.
+
 Re-render an existing package without calling an LLM or image provider:
 
 ```bash
@@ -91,6 +102,7 @@ python -m app.main generate --output-dir "outputs/posts/..." --resume --image-va
 ```text
 app/                  CLI, planning, discovery, rendering, quality, and provider code
 data/research/        Local research packs
+data/hosts/           Fictional host profiles
 data/patterns/        Carousel pattern library
 tests/                Unit tests
 outputs/posts/        Generated post packages, ignored by git
@@ -126,6 +138,7 @@ Current limitations:
 - No Instagram auto-publishing.
 - No scheduling, dashboard, database, or deployment configuration.
 - LLM providers and Pollinations require internet access at runtime.
+- Explainer host identity consistency uses repeated prompts and reference assets; it is not guaranteed perfect face locking.
 - Generated image quality can vary and should be reviewed.
 - Lightweight quality gates are helpful but not a substitute for editorial review.
 

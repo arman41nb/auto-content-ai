@@ -15,6 +15,12 @@ from types import SimpleNamespace
 from PIL import Image
 
 from app.config import load_config
+from app.content.explainer_planner import plan_explainer_host_reel
+from app.content.explainer_schemas import (
+    ExplainerPlan,
+    explainer_plan_to_carousel_plan,
+    explainer_plan_to_reel_plan,
+)
 from app.content.planner import CarouselPlanner
 from app.content.reel_schemas import (
     ReelPlan,
@@ -25,6 +31,9 @@ from app.content.reel_schemas import (
 from app.content.schemas import CarouselPlan
 from app.discovery.discovery_pipeline import DiscoveryPipeline, write_discovery_reports
 from app.discovery.schemas import TopicCandidate
+from app.host.host_consistency import host_consistency_report
+from app.host.host_profile import HostProfile, load_host_profile
+from app.host.host_prompt import build_host_reference_prompt, build_host_scene_prompt
 from app.image.pollinations_client import PollinationsClient
 from app.image.prompt_builder import build_image_prompt
 from app.image.quality import score_candidate, select_best_candidate, selection_to_dict
@@ -32,10 +41,12 @@ from app.image.sanitizer import preferred_image_dir, sanitize_post_images
 from app.llm.provider_factory import build_llm_providers
 from app.quality.candidate_scorer import score_candidate_folder
 from app.quality.contact_sheet import create_batch_contact_sheet, create_qa_contact_sheet
+from app.quality.explainer_quality import run_explainer_quality_gate
 from app.quality.native_reel_quality import run_native_reel_quality_gate
 from app.quality.overlay_masks import get_expected_overlay_regions
 from app.quality.post_quality_gate import PostQualityReport, run_post_quality_gate
 from app.render.carousel_renderer import CarouselRenderer
+from app.render.explainer_host_reel_renderer import export_explainer_host_reel
 from app.render.kinetic_captions import (
     build_caption_timing_from_srt,
     caption_quality_metrics,
@@ -46,7 +57,9 @@ from app.render.media_utils import audio_duration_seconds, video_duration_second
 from app.render.native_reel_renderer import export_native_reel_story, get_ffmpeg_path
 from app.render.reel_exporter import export_reel_package
 from app.render.subtitles import build_subtitle_cues, write_subtitle_files
+from app.media.media_planner import create_media_plan
 from app.research.research_pack_loader import load_research_pack
+from app.research.web_research_pack import load_explainer_research_pack
 from app.storage.post_exporter import PostExporter
 from app.strategy.pattern_library import load_relevant_patterns
 
@@ -332,6 +345,7 @@ def add_sanitizer_argument(parser: argparse.ArgumentParser) -> None:
 
 def generate(args: argparse.Namespace) -> int:
     native_reel_mode = is_native_reel_story(args)
+    explainer_host_mode = is_explainer_host_reel(args)
     if native_reel_mode and args.image_variants < 3:
         args.image_variants = 3
     if getattr(args, "voiceover", False) and not getattr(args, "make_reel", False):
@@ -357,6 +371,8 @@ def generate(args: argparse.Namespace) -> int:
     warnings = list(config.warnings)
     planning_info = empty_planning_info()
     reel_plan: ReelPlan | None = None
+    explainer_plan: ExplainerPlan | None = None
+    host_profile: HostProfile | None = None
     grounding_warnings: list[str] = []
     research_pack_used = "none"
     pattern_library_used = False
@@ -367,6 +383,10 @@ def generate(args: argparse.Namespace) -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
         plan = load_plan(output_dir / "carousel_plan.json")
         reel_plan = load_reel_plan(output_dir / "reel_plan.json") if native_reel_mode else None
+        explainer_plan = load_explainer_plan(output_dir / "explainer_plan.json") if explainer_host_mode else None
+        if explainer_plan is not None:
+            reel_plan = explainer_plan_to_reel_plan(explainer_plan)
+            host_profile = load_host_profile()
         existing_metadata = load_existing_metadata(output_dir)
         apply_plan_defaults(args, plan)
     elif args.plan_file:
@@ -385,6 +405,34 @@ def generate(args: argparse.Namespace) -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
         exporter.save_plan(output_dir, plan)
         planning_info = empty_planning_info(provider="plan_file", model=str(resolve_output_dir(config.project_root, args.plan_file)))
+    elif explainer_host_mode:
+        topic = str(args.topic or "What is the relationship between oil prices and the dollar?")
+        host_profile = load_host_profile()
+        research_result = load_explainer_research_pack(
+            topic=topic,
+            niche=str(args.niche or "economy"),
+            research_root=config.project_root / "data" / "research",
+        )
+        grounding_warnings = [str(warning) for warning in research_result.get("warnings", []) if str(warning).strip()]
+        warnings.extend(grounding_warnings)
+        research_pack_used = str(research_result.get("path", "")) if research_result.get("used") else "none"
+        explainer_plan = plan_explainer_host_reel(topic, str(args.niche or "economy"), host_profile)
+        reel_plan = explainer_plan_to_reel_plan(explainer_plan)
+        plan = explainer_plan_to_carousel_plan(explainer_plan)
+        args.topic = explainer_plan.topic
+        args.niche = explainer_plan.niche
+        args.slides = len(explainer_plan.scenes)
+        output_dir = (
+            resolve_output_dir(config.project_root, args.output_dir)
+            if args.output_dir
+            else exporter.create_output_dir(explainer_plan.topic, created_at)
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Output: {output_dir}")
+        exporter.save_plan(output_dir, plan)
+        save_reel_plan(output_dir, reel_plan)
+        save_explainer_plan(output_dir, explainer_plan)
+        planning_info = empty_planning_info(provider="deterministic", model="explainer_host_reel/topic_factory")
     elif native_reel_mode:
         discovery_candidate = getattr(args, "topic_discovery_candidate", None)
         topic = str(getattr(discovery_candidate, "topic", None) or args.topic or "What if gravity doubled for one day?")
@@ -465,6 +513,9 @@ def generate(args: argparse.Namespace) -> int:
     if args.render_only or args.resume or args.plan_file:
         print(f"Output: {output_dir}")
     args.generated_output_dir = output_dir
+    if explainer_host_mode:
+        args.explainer_plan = explainer_plan
+        args.host_profile = host_profile
 
     status = "planned"
     raw_dir = output_dir / "raw_images"
@@ -475,8 +526,18 @@ def generate(args: argparse.Namespace) -> int:
     reel_export: dict[str, object] = {"requested": bool(getattr(args, "make_reel", False)), "created_video": False}
     voiceover_info: dict[str, object] = {"script_created": False, "tts_created": False}
     native_reel_render_metadata: dict[str, object] = {}
+    explainer_reel_render_metadata: dict[str, object] = {}
+    media_plan_info: dict[str, object] = {}
+    host_consistency: dict[str, object] = {}
     image_model = "none"
     resume_warnings: list[str] = []
+
+    if explainer_host_mode and explainer_plan is not None:
+        print("Planning explainer media sources...")
+        media_plan_info = create_media_plan(explainer_plan, output_dir, raw_dir)
+        if host_profile is None:
+            host_profile = load_host_profile()
+        host_consistency = host_consistency_report(config.project_root, host_profile)
 
     if args.render_only:
         missing_raw = missing_raw_images(plan, raw_dir)
@@ -503,7 +564,17 @@ def generate(args: argparse.Namespace) -> int:
         warnings.extend(renderer.warnings)
         if getattr(args, "make_reel", False):
             print("Preparing Reel package...")
-            if native_reel_mode:
+            if explainer_host_mode and explainer_plan is not None:
+                result = export_explainer_host_reel(
+                    explainer_plan=explainer_plan,
+                    image_dir=preferred_image_dir(output_dir, raw_dir),
+                    output_dir=output_dir,
+                    handle=args.handle,
+                    voiceover_duration_seconds=existing_voiceover_duration(output_dir)
+                    if getattr(args, "voiceover", False)
+                    else 0.0,
+                )
+            elif native_reel_mode:
                 if reel_plan is None:
                     reel_plan = native_reel_plan_for_topic(plan.topic, plan.niche)
                     save_reel_plan(output_dir, reel_plan)
@@ -531,6 +602,10 @@ def generate(args: argparse.Namespace) -> int:
                 reel_export["template"] = "native_reel_story"
                 reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
                 native_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
+            if explainer_host_mode:
+                reel_export["template"] = "explainer_host_reel"
+                reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
+                explainer_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
             if result.created_video:
                 print(f"Reel saved at: {result.reel_path}")
             elif result.cover_path.exists():
@@ -544,7 +619,7 @@ def generate(args: argparse.Namespace) -> int:
                     result.reel_path,
                     args,
                     reel_plan,
-                    native_reel_render_metadata,
+                    explainer_reel_render_metadata if explainer_host_mode else native_reel_render_metadata,
                 )
         metadata = merge_existing_metadata(
             existing_metadata,
@@ -562,6 +637,9 @@ def generate(args: argparse.Namespace) -> int:
                 "voiceover": voiceover_info,
                 "voiceover_requested": bool(getattr(args, "voiceover", False)),
                 "native_reel_render": native_reel_render_metadata if native_reel_mode else {},
+                "explainer_reel_render": explainer_reel_render_metadata if explainer_host_mode else {},
+                "media_plan": media_plan_info if explainer_host_mode else {},
+                "host_consistency": host_consistency if explainer_host_mode else {},
                 "warnings": sorted(set([*warnings, *existing_metadata.get("warnings", [])]))
                 if isinstance(existing_metadata.get("warnings", []), list)
                 else sorted(set(warnings)),
@@ -585,6 +663,15 @@ def generate(args: argparse.Namespace) -> int:
             )
             metadata["native_reel_quality"] = native_reel_quality
             exporter.save_metadata(output_dir, metadata)
+        if explainer_host_mode and explainer_plan is not None:
+            explainer_quality = run_explainer_quality_gate(
+                output_dir=output_dir,
+                plan=explainer_plan,
+                metadata=metadata,
+                voiceover_requested=bool(getattr(args, "voiceover", False)),
+            )
+            metadata["explainer_quality"] = explainer_quality
+            exporter.save_metadata(output_dir, metadata)
         quality_report = run_post_quality_gate(output_dir, plan, metadata)
         contact_sheet = create_qa_contact_sheet(
             final_dir=final_dir,
@@ -607,6 +694,8 @@ def generate(args: argparse.Namespace) -> int:
         quality_report = run_post_quality_gate(output_dir, plan, metadata)
         if native_reel_mode:
             write_native_reel_redesign_reports(output_dir, quality_report, metadata)
+        if explainer_host_mode and explainer_plan is not None:
+            write_explainer_host_reports(output_dir, explainer_plan, quality_report, metadata)
         print_generation_summary(output_dir, quality_report, resume_suggestion=True)
         return 0
 
@@ -615,10 +704,16 @@ def generate(args: argparse.Namespace) -> int:
             rate_limit_seconds=args.rate_limit
             if args.rate_limit is not None
             else config.pollinations_rate_limit_seconds,
-            width=1080 if native_reel_mode else 1080,
-            height=1920 if native_reel_mode else 1350,
+            width=1080 if native_reel_mode or explainer_host_mode else 1080,
+            height=1920 if native_reel_mode or explainer_host_mode else 1350,
         )
         image_model = image_client.model
+        if explainer_host_mode and host_profile is not None:
+            try:
+                ensure_host_reference_assets(config.project_root, host_profile, image_client)
+                host_consistency = host_consistency_report(config.project_root, host_profile)
+            except Exception as exc:
+                warnings.append(f"Host reference asset generation failed: {exc}")
         failed_slide_numbers = failed_slide_numbers_from_metadata(existing_metadata) if args.resume else set()
         if args.resume:
             resume_warnings = resume_warnings_for_existing_state(plan, raw_dir, final_dir, failed_slide_numbers)
@@ -665,7 +760,17 @@ def generate(args: argparse.Namespace) -> int:
 
     if getattr(args, "make_reel", False):
         print("Preparing Reel package...")
-        if native_reel_mode:
+        if explainer_host_mode and explainer_plan is not None:
+            result = export_explainer_host_reel(
+                explainer_plan=explainer_plan,
+                image_dir=preferred_image_dir(output_dir, raw_dir),
+                output_dir=output_dir,
+                handle=args.handle,
+                voiceover_duration_seconds=existing_voiceover_duration(output_dir)
+                if getattr(args, "voiceover", False)
+                else 0.0,
+            )
+        elif native_reel_mode:
             if reel_plan is None:
                 reel_plan = native_reel_plan_for_topic(plan.topic, plan.niche)
                 save_reel_plan(output_dir, reel_plan)
@@ -693,6 +798,10 @@ def generate(args: argparse.Namespace) -> int:
             reel_export["template"] = "native_reel_story"
             reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
             native_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
+        if explainer_host_mode:
+            reel_export["template"] = "explainer_host_reel"
+            reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
+            explainer_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
         if result.created_video:
             print(f"Reel saved at: {result.reel_path}")
         elif result.cover_path.exists():
@@ -709,7 +818,7 @@ def generate(args: argparse.Namespace) -> int:
                 result.reel_path,
                 args,
                 reel_plan,
-                native_reel_render_metadata,
+                explainer_reel_render_metadata if explainer_host_mode else native_reel_render_metadata,
             )
 
     exporter.save_image_selection_report(output_dir, image_selection_report)
@@ -734,6 +843,12 @@ def generate(args: argparse.Namespace) -> int:
     metadata["voiceover_requested"] = bool(getattr(args, "voiceover", False))
     if native_reel_mode:
         metadata["native_reel_render"] = native_reel_render_metadata
+    if explainer_host_mode:
+        metadata["explainer_reel_render"] = explainer_reel_render_metadata
+        metadata["media_plan"] = media_plan_info
+        metadata["host_consistency"] = host_consistency
+        metadata["human_review_required"] = True
+        metadata["automatic_posting_ready"] = False
     metadata = preserve_existing_context(existing_metadata, metadata)
     sanitizer_report = (
         sanitize_post_images(
@@ -776,6 +891,15 @@ def generate(args: argparse.Namespace) -> int:
         )
         metadata["native_reel_quality"] = native_reel_quality
         exporter.save_metadata(output_dir, metadata)
+    if explainer_host_mode and explainer_plan is not None:
+        explainer_quality = run_explainer_quality_gate(
+            output_dir=output_dir,
+            plan=explainer_plan,
+            metadata=metadata,
+            voiceover_requested=bool(getattr(args, "voiceover", False)),
+        )
+        metadata["explainer_quality"] = explainer_quality
+        exporter.save_metadata(output_dir, metadata)
     quality_report = run_post_quality_gate(output_dir, plan, metadata)
     contact_sheet = create_qa_contact_sheet(
         final_dir=final_dir,
@@ -798,6 +922,8 @@ def generate(args: argparse.Namespace) -> int:
     quality_report = run_post_quality_gate(output_dir, plan, metadata)
     if native_reel_mode:
         write_native_reel_redesign_reports(output_dir, quality_report, metadata)
+    if explainer_host_mode and explainer_plan is not None:
+        write_explainer_host_reports(output_dir, explainer_plan, quality_report, metadata)
 
     print("Done.")
     print_generation_summary(output_dir, quality_report, resume_suggestion=not quality_report.publish_ready)
@@ -1184,8 +1310,36 @@ def load_reel_plan(path: Path) -> ReelPlan | None:
     return ReelPlan.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def save_explainer_plan(output_dir: Path, explainer_plan: ExplainerPlan) -> None:
+    (output_dir / "explainer_plan.json").write_text(
+        json.dumps(explainer_plan.model_dump(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_explainer_plan(path: Path) -> ExplainerPlan | None:
+    if not path.exists():
+        return None
+    return ExplainerPlan.model_validate_json(path.read_text(encoding="utf-8"))
+
+
 def is_native_reel_story(args: argparse.Namespace) -> bool:
     return str(getattr(args, "template", "") or "").strip() == "native_reel_story"
+
+
+def is_explainer_host_reel(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "template", "") or "").strip() == "explainer_host_reel"
+
+
+def ensure_host_reference_assets(project_root: Path, host: HostProfile, image_client: PollinationsClient) -> None:
+    asset_root = project_root / "host_assets" / host.host_id
+    asset_root.mkdir(parents=True, exist_ok=True)
+    for index, path in enumerate((asset_root / "reference_01.jpg", asset_root / "reference_02.jpg"), start=1):
+        if path.exists():
+            continue
+        image_client.generate_image(build_host_reference_prompt(host, index), path)
+        if index == 1:
+            image_client.wait_between_requests()
 
 
 def existing_voiceover_duration(output_dir: Path) -> float:
@@ -1292,6 +1446,8 @@ def generate_or_select_images(
     slides_to_generate: list[int] = []
     for slide in plan.slides:
         raw_path = raw_dir / f"slide_{slide.slide_number:02d}.jpg"
+        if is_explainer_host_reel(args) and raw_path.exists() and slide.slide_number not in failed_slide_numbers:
+            continue
         if not args.resume or slide.slide_number in failed_slide_numbers or not raw_path.exists():
             slides_to_generate.append(slide.slide_number)
 
@@ -1301,6 +1457,8 @@ def generate_or_select_images(
         built_prompt = build_image_prompt(slide, niche)
         if is_native_reel_story(args):
             built_prompt = SimpleNamespace(prompt=build_native_scene_image_prompt(slide.image_prompt, slide.slide_number))
+        elif is_explainer_host_reel(args):
+            built_prompt = SimpleNamespace(prompt=build_explainer_scene_image_prompt(args, slide.image_prompt, slide.slide_number))
         variant_paths = existing_variant_paths(raw_dir, slide.slide_number)
         selected_raw = raw_dir / f"slide_{slide.slide_number:02d}.jpg"
         if args.resume and selected_raw.exists() and selected_raw not in variant_paths:
@@ -1396,6 +1554,26 @@ def build_native_scene_image_prompt(base_prompt: str, scene_number: int, alterna
             "strong subject separation, natural light, no empty black lower band, no carousel layout, no poster design",
             "strict image-only rule: no text, no letters, no words, no signs, no signage, no labels, no logos, no watermark, no typography",
             alternate_note,
+        ]
+        if part.strip()
+    )
+
+
+def build_explainer_scene_image_prompt(args: argparse.Namespace, base_prompt: str, scene_number: int) -> str:
+    explainer_plan = getattr(args, "explainer_plan", None)
+    host_profile = getattr(args, "host_profile", None)
+    scene = None
+    if isinstance(explainer_plan, ExplainerPlan) and 1 <= scene_number <= len(explainer_plan.scenes):
+        scene = explainer_plan.scenes[scene_number - 1]
+    if scene is not None and scene.visual_type == "host_ai" and isinstance(host_profile, HostProfile):
+        return build_host_scene_prompt(host_profile, scene.visual_goal, scene_number)
+    return " ".join(
+        part.strip()
+        for part in [
+            base_prompt,
+            "premium educational explainer visual, cinematic but natural, native vertical 9:16 composition",
+            "clear subject, clean lower-third safe area for captions, no poster layout, no giant black boxes",
+            "strict image-only rule: no text, no letters, no words, no signs, no labels, no logos, no watermark, no typography",
         ]
         if part.strip()
     )
@@ -1612,6 +1790,135 @@ def output_root_qa_dir(output_dir: Path) -> Path:
         if parent.name == "outputs":
             return parent / "qa"
     return output_dir / "qa"
+
+
+def write_explainer_host_reports(
+    output_dir: Path,
+    explainer_plan: ExplainerPlan,
+    quality_report: PostQualityReport,
+    metadata: dict[str, object],
+) -> None:
+    qa_dir = output_root_qa_dir(output_dir)
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    voiceover = metadata.get("voiceover", {}) if isinstance(metadata.get("voiceover", {}), dict) else {}
+    explainer_quality = metadata.get("explainer_quality", {}) if isinstance(metadata.get("explainer_quality", {}), dict) else {}
+    media_plan = load_json_file(output_dir / "media_plan.json")
+    attribution = load_json_file(output_dir / "media_attribution.json")
+    primary_video = str(
+        voiceover.get("reel_with_voice_kinetic_subtitles_path")
+        or output_dir / "final_reel" / "reel_with_voice_kinetic_subtitles.mp4"
+    )
+    payload = {
+        "template": "explainer_host_reel",
+        "topic": explainer_plan.topic,
+        "primary_video_path": primary_video,
+        "cover_path": str(output_dir / "final_reel" / "cover.jpg"),
+        "qa_contact_sheet": str(output_dir / "qa_contact_sheet.jpg"),
+        "media_sources_used": media_plan.get("media_sources_used", []),
+        "external_media_used": bool(media_plan.get("external_media_used", False)),
+        "attribution_file": str(output_dir / "media_attribution.json"),
+        "host_consistency_notes": metadata.get("host_consistency", {}),
+        "factual_caveats": explainer_plan.caveats,
+        "human_review_required": True,
+        "automatic_posting_ready": False,
+        "post_quality_score": quality_report.score,
+        "explainer_quality": explainer_quality,
+        "media_attribution": attribution,
+    }
+    for stem in ("explainer_host_technical_report", "explainer_host_review_report"):
+        (qa_dir / f"{stem}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    technical_lines = [
+        "# Explainer Host Technical Report",
+        "",
+        f"- template: {payload['template']}",
+        f"- topic: {payload['topic']}",
+        f"- primary_video_path: {payload['primary_video_path']}",
+        f"- cover_path: {payload['cover_path']}",
+        f"- qa_contact_sheet: {payload['qa_contact_sheet']}",
+        f"- media_sources_used: {', '.join(str(item) for item in payload['media_sources_used'])}",
+        f"- attribution_file: {payload['attribution_file']}",
+        f"- caption_sync_score: {explainer_quality.get('caption_sync_score', 0)}",
+        f"- caption_layout_score: {explainer_quality.get('caption_layout_score', 0)}",
+        f"- explanation_value_score: {explainer_quality.get('explanation_value_score', 0)}",
+        f"- media_relevance_score: {explainer_quality.get('media_relevance_score', 0)}",
+        f"- host_consistency_score: {explainer_quality.get('host_consistency_score', 0)}",
+        f"- professional_edit_score: {explainer_quality.get('professional_edit_score', 0)}",
+        f"- viral_readiness_score: {explainer_quality.get('viral_readiness_score', 0)}",
+        "",
+        "## Notes",
+        "- Human review is required. This mode does not mark content as auto-posting ready.",
+    ]
+    (qa_dir / "explainer_host_technical_report.md").write_text("\n".join(technical_lines) + "\n", encoding="utf-8")
+    review_lines = [
+        "# Explainer Host Review Report",
+        "",
+        f"- primary video path: {payload['primary_video_path']}",
+        f"- cover path: {payload['cover_path']}",
+        f"- qa contact sheet: {payload['qa_contact_sheet']}",
+        f"- media sources used: {', '.join(str(item) for item in payload['media_sources_used'])}",
+        f"- attribution file: {payload['attribution_file']}",
+        f"- host consistency notes: {metadata.get('host_consistency', {})}",
+        "",
+        "## Factual Caveats",
+        *[f"- {caveat}" for caveat in explainer_plan.caveats],
+        "",
+        "## Human Review Checklist",
+        "1. Does the host feel consistent and not creepy?",
+        "2. Is the explanation actually useful?",
+        "3. Are stock/API images relevant and high quality?",
+        "4. Are captions synced and clean?",
+        "5. Does the edit feel premium?",
+        "6. Is there enough visual variety?",
+        "7. Is there any misleading financial claim?",
+        "8. Would this be save/share-worthy?",
+    ]
+    (qa_dir / "explainer_host_review_report.md").write_text("\n".join(review_lines) + "\n", encoding="utf-8")
+    write_explainer_architecture_plan(qa_dir)
+
+
+def write_explainer_architecture_plan(qa_dir: Path) -> None:
+    architecture = {
+        "template": "explainer_host_reel",
+        "host_character_profile": "data/hosts/nova.json",
+        "script_planner": "app/content/explainer_planner.py",
+        "media_sourcing_layer": "app/media",
+        "media_selection_ranking": "app/media/media_ranker.py",
+        "rendering_editing": "app/render/explainer_host_reel_renderer.py",
+        "quality_gate": "app/quality/explainer_quality.py",
+        "limitations": "Host identity consistency uses repeated visual prompts and reference assets, not guaranteed face locking.",
+    }
+    (qa_dir / "explainer_host_architecture_plan.json").write_text(
+        json.dumps(architecture, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (qa_dir / "explainer_host_architecture_plan.md").write_text(
+        "\n".join(
+            [
+                "# Explainer Host Architecture Plan",
+                "",
+                "- host character profile: data/hosts/nova.json",
+                "- explainer script plan: app/content/explainer_planner.py and app/content/explainer_schemas.py",
+                "- media sourcing layer: app/media providers for AI, Pexels, Unsplash, and Wikimedia",
+                "- media selection/ranking: relevance, vertical usability, license safety, clarity, and source trust",
+                "- rendering/editing: app/render/explainer_host_reel_renderer.py with existing kinetic captions",
+                "- quality gate: app/quality/explainer_quality.py",
+                "- limitation: exact host face consistency is not guaranteed in the MVP.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_json_file(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def reel_export_metadata(result: object, requested: bool) -> dict[str, object]:

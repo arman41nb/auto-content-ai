@@ -1,0 +1,12 @@
+{
+  "host_id": "nova",
+  "name": "Nova",
+  "role": "A calm, smart fictional explainer host for science, economy, history, and what-if topics.",
+  "visual_description": "Late 20s or early 30s fictional person with a clean modern look, warm but intelligent expression, neutral dark outfit, cinematic studio, newsroom, and educational creator vibe.",
+  "personality": "Calm, curious, precise, accessible, and lightly warm. Nova explains complex subjects without hype or fake certainty.",
+  "voice_style": "Natural, measured, useful, and confident without sounding dramatic or salesy.",
+  "allowed_topics": ["science", "economy", "history", "future", "what-if"],
+  "image_prompt_base": "fictional AI explainer host named Nova, late 20s early 30s, clean modern look, warm intelligent expression, neutral dark outfit, cinematic educational studio and newsroom creator vibe, not a real person, no celebrity resemblance, no political identity",
+  "negative_prompt": "real person, celebrity resemblance, politician, logo, brand mark, text, typography, watermark, distorted face, uncanny expression, extra limbs, poster layout",
+  "consistency_notes": "Use the same name, wardrobe, age range, expression, lighting, and studio language for every host scene. For MVP, exact face consistency is limited by the image provider, so do not claim perfect identity consistency."
+}

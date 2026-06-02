@@ -74,8 +74,8 @@ class ReelPlan(BaseModel):
         if not 8.0 <= total_duration <= 12.0:
             raise ValueError(f"Total duration must be 8-12 seconds. Got {total_duration:.1f}.")
         voiceover_words = count_words(" ".join(scene.voiceover_line for scene in self.scenes))
-        if not 25 <= voiceover_words <= 45:
-            raise ValueError(f"Total voiceover must be 25-45 words. Got {voiceover_words}.")
+        if not 25 <= voiceover_words <= 105:
+            raise ValueError(f"Total voiceover must be 25-105 words. Got {voiceover_words}.")
         return self
 
     @property
