@@ -150,6 +150,7 @@ def render_kinetic_caption_video(
     caption_segments: list[dict[str, Any]],
     scene_timings: list[dict[str, Any]],
     total_duration_seconds: float,
+    caption_style: str = "pro_yellow_word",
 ) -> dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(temp_dir, ignore_errors=True)
@@ -172,6 +173,7 @@ def render_kinetic_caption_video(
             now=now,
             handle=handle,
             caption_segment=_active_caption(caption_segments, now),
+            caption_style=caption_style,
         )
         if frame_index % max(1, FPS // 5) == 0:
             layout_samples.extend(layouts)
@@ -205,7 +207,7 @@ def render_kinetic_caption_video(
         "error": "" if completed.returncode == 0 else (completed.stderr or completed.stdout or "Unknown FFmpeg error"),
         "frame_count": segment_count,
         "fps": FPS,
-        "caption_style": "pro_yellow_word",
+        "caption_style": caption_style,
         **metrics,
     }
 
@@ -445,6 +447,7 @@ def _compose_frame(
     now: float,
     handle: str,
     caption_segment: dict[str, Any] | None,
+    caption_style: str = "pro_yellow_word",
 ) -> tuple[Image.Image, list[CaptionLayout]]:
     canvas = _motion_background(image_path, scene_number, progress, now)
     canvas = Image.alpha_composite(canvas, _gradient_overlay(0.58))
@@ -453,14 +456,14 @@ def _compose_frame(
     layouts: list[CaptionLayout] = []
     hook_zone: AvoidanceZone | None = None
     if scene_number == 1 and now < 0.92:
-        hook_layout = _draw_hook_title(draw, scene_text, now)
+        hook_layout = _draw_hook_title(draw, scene_text, now, caption_style)
         layouts.append(hook_layout)
         hook_zone = AvoidanceZone("hook_title", hook_layout.background_box, priority=90)
     if caption_segment:
         avoidance = [handle_zone(), scene_label_zone(), instagram_bottom_unsafe_zone()]
         if hook_zone is not None:
             avoidance.append(hook_zone)
-        layouts.append(_draw_active_word_caption(draw, caption_segment, now, scene_number, avoidance))
+        layouts.append(_draw_active_word_caption(draw, caption_segment, now, scene_number, avoidance, caption_style))
     _draw_handle(draw, handle)
     return canvas.convert("RGB"), layouts
 
@@ -530,12 +533,12 @@ def _gradient_overlay(strength: float) -> Image.Image:
     return gradient
 
 
-def _draw_hook_title(draw: ImageDraw.ImageDraw, scene_text: str, now: float) -> CaptionLayout:
+def _draw_hook_title(draw: ImageDraw.ImageDraw, scene_text: str, now: float, caption_style: str = "pro_yellow_word") -> CaptionLayout:
     intro = min(1.0, max(0.0, now / 0.22))
     layout = layout_caption_block(
         draw,
         [{"word": word} for word in scene_text.upper().split()[:5]],
-        style_preset="pro_yellow_word",
+        style_preset=caption_style if caption_style == "hybrid_editorial" else "pro_yellow_word",
         scene_role="hook_title",
         avoidance_zones=[handle_zone(), scene_label_zone(), instagram_bottom_unsafe_zone()],
         priority=90,
@@ -576,12 +579,13 @@ def _draw_active_word_caption(
     now: float,
     scene_number: int,
     avoidance_zones: list[AvoidanceZone],
+    caption_style: str = "pro_yellow_word",
 ) -> CaptionLayout:
     words = segment.get("words", [])
     if not isinstance(words, list) or not words:
         words = [{"word": word} for word in str(segment.get("text", "")).split()]
     active_index = _active_word_index(words, now)
-    style = "pro_yellow_word" if scene_number in {1, 3, 5} else "pro_cyan_phrase"
+    style = caption_style if caption_style == "hybrid_editorial" else "pro_yellow_word" if scene_number in {1, 3, 5} else "pro_cyan_phrase"
     layout = layout_caption_block(
         draw,
         words,

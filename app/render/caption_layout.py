@@ -82,6 +82,20 @@ STYLE_PRESETS: dict[str, TextStylePreset] = {
         word_gap=14,
         line_gap=10,
     ),
+    "hybrid_editorial": TextStylePreset(
+        name="hybrid_editorial",
+        base_font_size=54,
+        min_font_size=40,
+        active_fill=(255, 222, 92, 255),
+        inactive_fill=(248, 248, 244, 232),
+        future_fill=(226, 226, 220, 158),
+        stroke_width=4,
+        background_fill=(0, 0, 0, 42),
+        background_padding_x=18,
+        background_padding_y=10,
+        word_gap=14,
+        line_gap=10,
+    ),
 }
 
 

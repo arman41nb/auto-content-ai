@@ -15,6 +15,7 @@ Manual review is required before posting. The project does not auto-publish to I
 - Carousel rendering with Pillow.
 - Native `native_reel_story` output for 1080x1920, five-scene cinematic Reels.
 - Hosted `explainer_host_reel` output with a fictional host, media planning, stock/Wikimedia/chart support, and explainer quality reports.
+- `hybrid_story_explainer` output for eight-scene story-led Reels with real-world context, small Miko guidance, proxy/questioner scenes, premium infographics, and hybrid quality reports.
 - Reel export with FFmpeg or the bundled `imageio-ffmpeg` fallback.
 - Optional `edge-tts` voiceover generation and audio muxing.
 - Quality gate reports for generated post packages.
@@ -43,6 +44,7 @@ Required environment keys are all optional at runtime:
 - `UNSPLASH_ACCESS_KEY` optional for explainer stock media
 
 The app skips missing LLM and media providers gracefully. Discovery can also use `NASA_API_KEY`; if it is empty, the NASA source falls back to public demo access where supported.
+Use `python -m app.main media-health` to check media-provider configuration without printing secret values.
 
 ## FFmpeg and Voiceover
 
@@ -84,6 +86,14 @@ python -m app.main generate --topic "What is the relationship between oil prices
 ```
 
 Explainer outputs include `explainer_plan.json`, `media_plan.json`, `media_selection_report.json`, `media_attribution.json`, `explainer_quality_report.md/json`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/cover.jpg`, and QA reports under `outputs/qa`. The fictional default host is Nova (`data/hosts/nova.json`). Host reference assets are generated under `host_assets/` and are ignored by git.
+
+Generate one hybrid story explainer Reel:
+
+```bash
+python -m app.main generate --topic "What is the relationship between oil prices and the dollar?" --niche economy --slides 8 --handle "@yourpage" --image-variants 3 --rate-limit 25 --llm-provider auto --make-reel --template hybrid_story_explainer --voiceover --mascot miko --media-sources mixed --prefer-video-media --no-human-host --production-visual-minimums --allow-questioner --max-mascot-frame-share 0.35 --require-real-world-context-scenes 3 --caption-style hybrid_editorial
+```
+
+Hybrid story outputs include `hybrid_story_plan.json`, `media_candidates.json`, `media_decision_report.json`, `media_selection_report.json`, `media_attribution.json`, `hybrid_story_quality_report.md/json`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/cover.jpg`, and `outputs/qa/hybrid_story_v1_*_report.md/json`.
 
 Re-render an existing package without calling an LLM or image provider:
 
@@ -139,6 +149,7 @@ Current limitations:
 - No scheduling, dashboard, database, or deployment configuration.
 - LLM providers and Pollinations require internet access at runtime.
 - Explainer host identity consistency uses repeated prompts and reference assets; it is not guaranteed perfect face locking.
+- Hybrid mascot consistency uses reference assets and small contextual prompts; human review is still required.
 - Generated image quality can vary and should be reviewed.
 - Lightweight quality gates are helpful but not a substitute for editorial review.
 
