@@ -11,10 +11,14 @@ def rank_media_items(items: list[MediaItem], query: str) -> list[MediaItem]:
     ranked: list[MediaItem] = []
     for item in items:
         title_text = f"{item.title} {item.url}".lower()
-        relevance = min(100, 45 + sum(12 for term in terms if term in title_text))
+        relevance = min(100, 42 + sum(12 for term in terms if term in title_text))
+        if any(term in title_text for term in ("oil", "barrel", "fuel", "refinery", "tanker", "currency", "market", "trade", "dollar")):
+            relevance = min(100, relevance + 12)
         vertical = _vertical_score(item.width, item.height)
         license_score = license_safety_score(item)
-        clarity = 84 if item.width >= 1080 or item.height >= 1080 else 62
+        clarity = 88 if item.width >= 1080 and item.height >= 1280 else 82 if item.height >= 1080 else 58
+        if item.media_type == "stock_video":
+            clarity = min(95, clarity + 4)
         trust = 90 if item.provider in {"pexels", "unsplash", "wikimedia"} else 72
         ranked.append(
             item.model_copy(

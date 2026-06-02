@@ -15,10 +15,14 @@ from app.media.media_ranker import rank_media_items
 from app.media.pexels_provider import PexelsProvider
 from app.media.unsplash_provider import UnsplashProvider
 from app.media.visual_fallbacks import (
+    AI_GENERATED_PROVIDER,
     EXTERNAL_PROVIDERS,
+    PREMIUM_INFOGRAPHIC_PROVIDER,
+    PRODUCTION_VISUAL_MINIMUMS,
     create_scene_fallback,
     missing_media_api_keys,
     scene_has_real_visual,
+    scene_needs_ai_generation,
     visual_quality_warnings,
     write_media_fallback_report,
 )
@@ -35,6 +39,7 @@ def create_media_plan(
     media_sources: str = "mixed",
     prefer_video_media: bool = False,
     relevance_threshold: int = 80,
+    production_visual_minimums: bool = PRODUCTION_VISUAL_MINIMUMS,
 ) -> dict[str, object]:
     raw_dir.mkdir(parents=True, exist_ok=True)
     providers = [PexelsProvider(), UnsplashProvider(), WikimediaProvider()]
@@ -65,19 +70,30 @@ def create_media_plan(
                 source_trust_score=86,
             )
         elif scene.visual_type == "chart_motion":
-            selected = create_scene_fallback(scene, raw_path, mascot=mascot)
+            selected = create_scene_fallback(
+                scene,
+                raw_path,
+                mascot=mascot,
+                production_visual_minimums=production_visual_minimums,
+            )
         elif scene.visual_type in {"mascot_ai", "object_scene_ai", "mixed"}:
-            selected = create_scene_fallback(scene, raw_path, mascot=mascot)
-            fallback_events.append(_fallback_event(scene, "generated local AI-style fallback visual", selected))
+            selected = create_scene_fallback(
+                scene,
+                raw_path,
+                mascot=mascot,
+                production_visual_minimums=production_visual_minimums,
+            )
+            fallback_events.append(_fallback_event(scene, "AI image generation scheduled; primitive local mascot fallback is forbidden", selected))
         elif scene.visual_type in {"host_ai", "ai_image", "simple_motion_graphic"} and template != "mascot_story_explainer":
             selected = ai_media_item(scene.visual_goal)
         else:
-            for provider in providers:
-                if provider.name not in allowed_sources:
-                    continue
-                if provider.name == "pexels" and prefer_video_media:
-                    candidates.extend(provider.search(scene.media_query, media_type="video", limit=4))
-                candidates.extend(provider.search(scene.media_query, limit=4))
+            for query in _expanded_queries(scene.media_query, template):
+                for provider in providers:
+                    if provider.name not in allowed_sources:
+                        continue
+                    if provider.name == "pexels" and prefer_video_media:
+                        candidates.extend(provider.search(query, media_type="video", limit=4))
+                    candidates.extend(provider.search(query, limit=4))
             if not candidates and "oil" in scene.media_query.lower():
                 wikimedia = WikimediaProvider()
                 for fallback_query in ("oil tanker", "oil barrels", "crude oil tanker"):
@@ -94,13 +110,23 @@ def create_media_plan(
                     else (["Scene visual file is missing; fallback required."] if not scene_has_real_visual(selected) else [])
                 )
                 if warnings:
-                    fallback = create_scene_fallback(scene, raw_path, mascot=mascot)
+                    fallback = create_scene_fallback(
+                        scene,
+                        raw_path,
+                        mascot=mascot,
+                        production_visual_minimums=production_visual_minimums,
+                    )
                     fallback_events.append(_fallback_event(scene, "; ".join(warnings), fallback, original=selected))
                     selected = fallback
             else:
                 if template == "mascot_story_explainer":
-                    selected = create_scene_fallback(scene, raw_path, mascot=mascot)
-                    fallback_events.append(_fallback_event(scene, "no suitable external media found", selected))
+                    selected = create_scene_fallback(
+                        scene,
+                        raw_path,
+                        mascot=mascot,
+                        production_visual_minimums=production_visual_minimums,
+                    )
+                    fallback_events.append(_fallback_event(scene, "no suitable external media found; AI image generation scheduled", selected))
                 else:
                     create_fallback_visual(raw_path, scene.visual_goal, scene.role)
                     selected = MediaItem(
@@ -116,8 +142,13 @@ def create_media_plan(
                         visual_clarity_score=58,
                         source_trust_score=45,
                     )
-        if template == "mascot_story_explainer" and not scene_has_real_visual(selected):
-            fallback = create_scene_fallback(scene, raw_path, mascot=mascot)
+        if template == "mascot_story_explainer" and not scene_has_real_visual(selected) and not scene_needs_ai_generation(selected):
+            fallback = create_scene_fallback(
+                scene,
+                raw_path,
+                mascot=mascot,
+                production_visual_minimums=production_visual_minimums,
+            )
             fallback_events.append(_fallback_event(scene, "selected media had no local visual file", fallback, original=selected))
             selected = fallback
         selected_items.append(selected)
@@ -134,6 +165,8 @@ def create_media_plan(
                 "generated_ai_prompt": getattr(scene, "visual_goal", "") if selected.media_type == "generated_ai_prompt" else "",
                 "generated_chart_spec": getattr(scene, "visual_goal", "") if selected.media_type == "generated_chart_spec" else "",
                 "external_media_used": selected.provider in EXTERNAL_PROVIDERS and scene_has_real_visual(selected),
+                "ai_generation_required": scene_needs_ai_generation(selected),
+                "scene_visual_quality": _scene_visual_quality(selected),
                 "warnings": _scene_warnings(selected),
             }
         )
@@ -143,15 +176,10 @@ def create_media_plan(
         "topic": plan.topic,
         "scenes": scene_reports,
         "media_sources_used": sources_used,
-        "external_media_used": any(
-            source in EXTERNAL_PROVIDERS and any(
-                isinstance(scene.get("selected"), dict) and scene["selected"].get("provider") == source and scene["selected"].get("local_path")
-                for scene in scene_reports
-            )
-            for source in sources_used
-        ),
+        "external_media_used": _external_media_used(scene_reports),
         "missing_api_keys": missing_keys,
         "prefer_video_media": bool(prefer_video_media),
+        "production_visual_minimums": bool(production_visual_minimums),
     }
     output_dir.joinpath("media_plan.json").write_text(json.dumps(media_plan, ensure_ascii=False, indent=2), encoding="utf-8")
     selection_report = {
@@ -167,12 +195,18 @@ def create_media_plan(
         json.dumps(attribution_payload(selected_items), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    output_dir.joinpath("media_quality_report.json").write_text(
+        json.dumps(_media_quality_report(media_plan, scene_reports), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     if template == "mascot_story_explainer":
         write_media_fallback_report(
             output_dir,
             {
                 "blank_scene_forbidden": True,
                 "placeholder_prompt_text_forbidden": True,
+                "primitive_vector_final_visuals_forbidden": True,
+                "production_visual_minimums": bool(production_visual_minimums),
                 "missing_api_keys": missing_keys,
                 "fallback_events": fallback_events,
                 "fallback_count": len(fallback_events),
@@ -183,6 +217,8 @@ def create_media_plan(
 
 def _scene_warnings(item: MediaItem) -> list[str]:
     warnings: list[str] = []
+    if scene_needs_ai_generation(item):
+        warnings.append("AI image generation is required before final render.")
     if item.provider in {"pexels", "unsplash", "wikimedia"} and not (item.attribution or item.author):
         warnings.append("External media is missing attribution metadata.")
     if item.local_path and item.visual_clarity_score < 60:
@@ -192,6 +228,37 @@ def _scene_warnings(item: MediaItem) -> list[str]:
     return warnings
 
 
+def _expanded_queries(query: str, template: str) -> list[str]:
+    base = [query]
+    if template != "mascot_story_explainer":
+        return base
+    lower = query.lower()
+    if any(term in lower for term in ("oil", "fuel", "dollar", "currency", "trade", "market")):
+        base.extend(
+            [
+                "oil refinery cinematic",
+                "oil tanker ship",
+                "oil barrels close up",
+                "fuel station night",
+                "currency exchange board",
+                "financial market screen",
+                "trading floor",
+                "global trade port",
+                "cargo ship containers",
+                "gas pump",
+            ]
+        )
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in base:
+        normalized = " ".join(str(item).split())
+        key = normalized.lower()
+        if normalized and key not in seen:
+            result.append(normalized)
+            seen.add(key)
+    return result
+
+
 def _parse_media_sources(value: str) -> set[str]:
     normalized = {item.strip().lower() for item in str(value or "mixed").split(",") if item.strip()}
     if not normalized or "auto" in normalized or "mixed" in normalized:
@@ -199,6 +266,65 @@ def _parse_media_sources(value: str) -> set[str]:
     if "ai" in normalized:
         return set()
     return normalized & {"pexels", "unsplash", "wikimedia"}
+
+
+def _scene_visual_quality(item: MediaItem) -> str:
+    if item.provider in {AI_GENERATED_PROVIDER, PREMIUM_INFOGRAPHIC_PROVIDER}:
+        return "pending_ai_generation" if scene_needs_ai_generation(item) else "pass"
+    if item.provider in EXTERNAL_PROVIDERS and scene_has_real_visual(item) and item.visual_clarity_score >= 75:
+        return "pass"
+    if item.provider in {"fallback", "ai_fallback", "primitive_debug"}:
+        return "fail"
+    return "review"
+
+
+def _external_media_used(scene_reports: list[dict[str, object]]) -> bool:
+    for scene in scene_reports:
+        selected = scene.get("selected", {})
+        if not isinstance(selected, dict):
+            continue
+        provider = str(selected.get("provider", ""))
+        path = Path(str(selected.get("local_path", "")))
+        if provider in EXTERNAL_PROVIDERS and path.exists() and path.stat().st_size > 0:
+            return True
+    return False
+
+
+def _media_quality_report(media_plan: dict[str, object], scene_reports: list[dict[str, object]]) -> dict[str, object]:
+    ai_required = [
+        int(scene.get("scene_number", 0) or 0)
+        for scene in scene_reports
+        if bool(scene.get("ai_generation_required", False))
+    ]
+    failed = [
+        int(scene.get("scene_number", 0) or 0)
+        for scene in scene_reports
+        if str(scene.get("scene_visual_quality", "")) == "fail"
+    ]
+    external_files = []
+    for scene in scene_reports:
+        selected = scene.get("selected", {})
+        if isinstance(selected, dict) and selected.get("provider") in EXTERNAL_PROVIDERS:
+            path = Path(str(selected.get("local_path", "")))
+            if path.exists():
+                external_files.append(str(path))
+    return {
+        "production_visual_minimums": bool(media_plan.get("production_visual_minimums", False)),
+        "external_media_used": bool(media_plan.get("external_media_used", False)),
+        "external_media_files_used": external_files,
+        "missing_api_keys": media_plan.get("missing_api_keys", []),
+        "ai_generation_required_scene_numbers": ai_required,
+        "failed_scene_visual_quality_numbers": failed,
+        "primitive_final_visuals_forbidden": True,
+        "scene_count": len(scene_reports),
+        "all_scenes_have_visual_plan": len(scene_reports) > 0 and not failed,
+        "warnings": [
+            warning
+            for scene in scene_reports
+            for warning in scene.get("warnings", [])
+            if isinstance(warning, str)
+        ],
+    }
 
 
 def _fallback_event(scene: Any, reason: str, fallback: MediaItem, original: MediaItem | None = None) -> dict[str, object]:

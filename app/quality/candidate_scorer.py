@@ -23,9 +23,11 @@ def score_candidate_folder(candidate_dir: Path, voiceover_requested: bool = True
     native = _read_json(candidate_dir / "native_reel_quality_report.json")
     post = _read_json(candidate_dir / "post_quality_report.json")
     plan = _read_json(candidate_dir / "carousel_plan.json")
+    human_review = _read_json(candidate_dir / "human_review.json")
 
     native = _dict(native or metadata.get("native_reel_quality", {}))
-    publish_ready = bool(post.get("publish_ready", False) and native.get("publish_ready", False))
+    rejected = str(human_review.get("status", "")).lower() == "rejected" or bool(human_review.get("do_not_post", False))
+    publish_ready = bool(post.get("publish_ready", False) and native.get("publish_ready", False)) and not rejected
     topic = str(metadata.get("topic") or plan.get("topic") or candidate_dir.name)
     lane = str(metadata.get("topic_discovery_lane") or _read_json(candidate_dir / "topic_discovery_selected.json").get("lane", "any"))
     reel_export = _dict(metadata.get("reel_export", {}))
@@ -57,6 +59,9 @@ def score_candidate_folder(candidate_dir: Path, voiceover_requested: bool = True
     candidate_score = round(max(0, min(100, weighted + bonus_adjustment)))
 
     warnings: list[str] = []
+    if rejected:
+        candidate_score = 0
+        warnings.append("human_review=rejected caps candidate_score at 0.")
     if not publish_ready:
         candidate_score = min(candidate_score, 60)
         warnings.append("publish_ready=false caps candidate_score at 60.")

@@ -72,6 +72,11 @@ from app.media.media_planner import create_media_plan
 from app.mascot.mascot_consistency import ensure_mascot_reference_assets, mascot_consistency_report
 from app.mascot.mascot_profile import MascotProfile, load_mascot_profile
 from app.mascot.mascot_prompt import build_mascot_scene_prompt
+from app.mascot.mascot_scene_generator import (
+    build_production_mascot_scene_prompt,
+    build_production_non_mascot_scene_prompt,
+    create_neutral_scene_fallback,
+)
 from app.research.research_pack_loader import load_research_pack
 from app.research.web_research_pack import load_explainer_research_pack
 from app.storage.post_exporter import PostExporter
@@ -103,6 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate.add_argument("--prefer-video-media", action="store_true", help="Prefer video-capable media search when available.")
     generate.add_argument("--no-human-host", action="store_true", help="Forbid human host scenes in supported templates.")
+    generate.add_argument(
+        "--production-visual-minimums",
+        action="store_true",
+        default=False,
+        help="Enforce production visual minimums for mascot_story_explainer.",
+    )
     generate.add_argument("--skip-images", action="store_true", help="Only save plan and metadata.")
     generate.add_argument(
         "--skip-render",
@@ -215,6 +226,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     auto.add_argument("--prefer-video-media", action="store_true", help="Prefer video-capable media search when available.")
     auto.add_argument("--no-human-host", action="store_true", help="Forbid human host scenes in supported templates.")
+    auto.add_argument(
+        "--production-visual-minimums",
+        action="store_true",
+        default=False,
+        help="Enforce production visual minimums for mascot_story_explainer.",
+    )
     auto.add_argument(
         "--sources",
         default="static,nasa,wikipedia,gdelt",
@@ -337,6 +354,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Expect reel_with_voice audio streams when scoring candidates.",
     )
+    mark_review_parser = subparsers.add_parser("mark-review", help="Mark a generated package with human review status.")
+    mark_review_parser.add_argument("--output-dir", required=True, help="Output package directory to mark.")
+    mark_review_parser.add_argument("--status", required=True, choices=["approved", "rejected", "needs_revision"], help="Human review status.")
+    mark_review_parser.add_argument("--reason", default="", help="Short human review reason.")
     return parser
 
 
@@ -384,6 +405,7 @@ def generate(args: argparse.Namespace) -> int:
         args.media_sources = str(getattr(args, "media_sources", "") or "mixed")
         args.prefer_video_media = True if getattr(args, "prefer_video_media", False) else True
         args.no_human_host = True
+        args.production_visual_minimums = True
     if getattr(args, "voiceover", False) and not getattr(args, "make_reel", False):
         args.make_reel = True
     if args.render_only and not args.output_dir:
@@ -611,7 +633,19 @@ def generate(args: argparse.Namespace) -> int:
         print("Planning mascot story media sources...")
         if mascot_profile is None:
             mascot_profile = load_mascot_profile(str(getattr(args, "mascot", "miko") or "miko"))
-        ensure_mascot_reference_assets(config.project_root, mascot_profile)
+        try:
+            asset_client = PollinationsClient(
+                rate_limit_seconds=args.rate_limit
+                if args.rate_limit is not None
+                else config.pollinations_rate_limit_seconds,
+                width=1080,
+                height=1920,
+                retries=1,
+            )
+            asset_report = ensure_mascot_reference_assets(config.project_root, mascot_profile, image_client=asset_client)
+            warnings.extend(str(warning) for warning in asset_report.get("warnings", []) if str(warning).strip())
+        except Exception as exc:
+            warnings.append(f"Mascot asset generation failed: {exc}")
         mascot_consistency = mascot_consistency_report(config.project_root, mascot_profile)
         media_plan_info = create_media_plan(
             mascot_story_plan,
@@ -622,6 +656,7 @@ def generate(args: argparse.Namespace) -> int:
             media_sources=str(getattr(args, "media_sources", "mixed") or "mixed"),
             prefer_video_media=bool(getattr(args, "prefer_video_media", True)),
             relevance_threshold=80,
+            production_visual_minimums=bool(getattr(args, "production_visual_minimums", True)),
         )
     if explainer_host_mode and explainer_plan is not None:
         print("Planning explainer media sources...")
@@ -1641,6 +1676,7 @@ def generate_or_select_images(
         if args.resume and selected_raw.exists() and selected_raw not in variant_paths:
             variant_paths.append(selected_raw)
         should_generate = slide.slide_number in slides_to_generate
+        slide_generation_warnings: list[str] = []
 
         print(f"  [{slide.slide_number:02d}/{len(plan.slides):02d}] {slide.visual_goal}")
         if should_generate:
@@ -1656,7 +1692,15 @@ def generate_or_select_images(
                     "same core concept, unique camera angle, preserve no-text rule."
                 )
                 print(f"    variant {variant:02d}/{args.image_variants:02d}")
-                image_client.generate_image(variant_prompt, variant_path)
+                try:
+                    image_client.generate_image(variant_prompt, variant_path)
+                except Exception as exc:
+                    if not is_mascot_story_explainer(args):
+                        raise
+                    create_neutral_scene_fallback(_mascot_scene_for_slide(args, slide.slide_number), variant_path)
+                    slide_generation_warnings.append(
+                        f"AI image provider failed for scene {slide.slide_number:02d}; neutral non-mascot fallback created and review is required: {exc}"
+                    )
                 variant_paths.append(variant_path)
                 request_count += 1
                 if request_count < total_requests:
@@ -1701,7 +1745,13 @@ def generate_or_select_images(
                 final_path=final_image_path,
                 niche=niche,
             )
-        report["slides"].append(selection_to_dict(selection))
+        selection_dict = selection_to_dict(selection)
+        if slide_generation_warnings:
+            warnings = selection_dict.get("image_quality_warnings", [])
+            if not isinstance(warnings, list):
+                warnings = []
+            selection_dict["image_quality_warnings"] = [*warnings, *slide_generation_warnings]
+        report["slides"].append(selection_dict)
     return report
 
 
@@ -1763,7 +1813,9 @@ def build_mascot_story_scene_image_prompt(args: argparse.Namespace, base_prompt:
     if isinstance(mascot_story_plan, MascotStoryPlan) and 1 <= scene_number <= len(mascot_story_plan.scenes):
         scene = mascot_story_plan.scenes[scene_number - 1]
     if scene is not None and scene.visual_type in {"mascot_ai", "mixed"} and isinstance(mascot_profile, MascotProfile):
-        return build_mascot_scene_prompt(mascot_profile, scene.mascot_action, scene.setting, scene.visual_goal)
+        return build_production_mascot_scene_prompt(mascot_profile, scene, scene_number)
+    if scene is not None:
+        return build_production_non_mascot_scene_prompt(scene)
     return " ".join(
         part.strip()
         for part in [
@@ -1774,6 +1826,13 @@ def build_mascot_story_scene_image_prompt(args: argparse.Namespace, base_prompt:
         ]
         if part.strip()
     )
+
+
+def _mascot_scene_for_slide(args: argparse.Namespace, slide_number: int) -> object:
+    mascot_story_plan = getattr(args, "mascot_story_plan", None)
+    if isinstance(mascot_story_plan, MascotStoryPlan) and 1 <= slide_number <= len(mascot_story_plan.scenes):
+        return mascot_story_plan.scenes[slide_number - 1]
+    return SimpleNamespace(role="", media_query="", visual_goal="")
 
 
 def _selection_needs_native_retry(selection: dict[str, object]) -> bool:
@@ -2123,14 +2182,26 @@ def write_mascot_story_reports(
         "prompt_text_visible_count": int(mascot_quality.get("prompt_text_visible_count", 0) or 0),
         "text_crop_count": int(mascot_quality.get("text_crop_count", 0) or 0),
         "caption_collision_count": int(mascot_quality.get("caption_collision_count", 0) or 0),
+        "primitive_mascot_risk": mascot_quality.get("primitive_mascot_risk", "low"),
+        "placeholder_visual_risk": mascot_quality.get("placeholder_visual_risk", "low"),
+        "powerpoint_chart_risk": mascot_quality.get("powerpoint_chart_risk", "low"),
+        "caption_box_dominance_ratio": mascot_quality.get("caption_box_dominance_ratio", 0),
+        "visual_asset_quality_score": mascot_quality.get("visual_asset_quality_score", 0),
+        "broll_or_ai_scene_quality_score": mascot_quality.get("broll_or_ai_scene_quality_score", 0),
         "mascot_scene_count": sum(1 for scene in mascot_story_plan.scenes if scene.visual_type in {"mascot_ai", "mixed"}),
         "all_media_files_exist": all(path.exists() for path in raw_paths),
         "external_media_files_used": external_files,
         "external_media_used_flag_truthful": bool(media_plan.get("external_media_used", False)) == bool(external_files),
+        "no_fake_external_media_claim": bool(media_plan.get("external_media_used", False)) == bool(external_files),
+        "production_visual_minimums_passed": bool(mascot_quality.get("quality_gate_passed", False)),
+        "media_sources_used": media_plan.get("media_sources_used", []),
+        "missing_api_keys": mascot_quality.get("missing_api_keys", []),
         "attribution_file_exists": (output_dir / "media_attribution.json").exists(),
         "quality_report_exists": (output_dir / "mascot_story_quality_report.json").exists(),
         "cover_path": str(output_dir / "final_reel" / "cover.jpg"),
         "qa_contact_sheet_path": str(output_dir / "qa_contact_sheet.jpg"),
+        "visual_aesthetic_report_path": str(output_dir / "visual_aesthetic_report.json"),
+        "media_quality_report_path": str(output_dir / "media_quality_report.json"),
         "post_quality_score": quality_report.score,
         "attribution": attribution,
     }
@@ -2179,6 +2250,31 @@ def load_json_file(path: Path) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def mark_review(args: argparse.Namespace) -> int:
+    config = load_config()
+    output_dir = resolve_output_dir(config.project_root, str(getattr(args, "output_dir", "")))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    status = str(getattr(args, "status", "")).strip().lower()
+    reason = str(getattr(args, "reason", "")).strip()
+    payload = {
+        "status": status,
+        "reason": reason,
+        "do_not_post": status != "approved",
+    }
+    (output_dir / "human_review.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    metadata = load_existing_metadata(output_dir)
+    metadata["human_review_status"] = status
+    metadata["human_review_reason"] = reason
+    metadata["do_not_post"] = status != "approved"
+    metadata["automatic_posting_ready"] = False
+    if metadata:
+        (output_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"human_review_status: {status}")
+    print(f"do_not_post: {str(status != 'approved').lower()}")
+    print(f"human_review_path: {output_dir / 'human_review.json'}")
+    return 0
 
 
 def reel_export_metadata(result: object, requested: bool) -> dict[str, object]:
@@ -3211,6 +3307,8 @@ def main(argv: list[str] | None = None) -> int:
             args.rate_limit = None
             args.llm_provider = None
             return batch_reels(args)
+        if args.command == "mark-review":
+            return mark_review(args)
         parser.error(f"Unknown command: {args.command}")
         return 2
     except Exception as exc:

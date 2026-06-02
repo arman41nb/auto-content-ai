@@ -75,6 +75,7 @@ class PexelsProvider(MediaProvider):
                     best_url = str(best.get("link", ""))
                     best_width = int(best.get("width", best_width) or best_width)
                     best_height = int(best.get("height", best_height) or best_height)
+            thumbnail_url = str(video.get("image", "") or "")
             user = video.get("user", {}) if isinstance(video.get("user", {}), dict) else {}
             items.append(
                 MediaItem(
@@ -82,7 +83,7 @@ class PexelsProvider(MediaProvider):
                     media_type="stock_video",
                     title=str(video.get("url", "") or query),
                     url=str(video.get("url", "")),
-                    download_url=best_url,
+                    download_url=thumbnail_url or best_url,
                     width=best_width,
                     height=best_height,
                     author=str(user.get("name", "")),

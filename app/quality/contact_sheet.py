@@ -33,7 +33,7 @@ def create_qa_contact_sheet(
     gap = 18
     header_h = 132
     sheet_w = (3 * thumb_w) + cover_w + (5 * gap)
-    slide_rows = min(2, (min(5, len(slide_paths)) + 2) // 3)
+    slide_rows = min(3, (min(8, len(slide_paths)) + 2) // 3)
     slide_area_h = slide_rows * (thumb_h + 44) - 44
     sheet_h = header_h + max(cover_h, slide_area_h) + 58
     canvas = Image.new("RGB", (sheet_w, sheet_h), (18, 18, 18))
@@ -70,7 +70,7 @@ def create_qa_contact_sheet(
         draw.rectangle((x, y, x + cover_w, y + cover_h), outline=(88, 88, 84), width=1)
         draw.text((x + 34, y + cover_h // 2), "cover missing", font=label_font, fill=(222, 160, 150))
 
-    for index, path in enumerate(slide_paths[:5]):
+    for index, path in enumerate(slide_paths[:8]):
         col = index % 3
         row = index // 3
         slide_x = x + cover_w + gap + col * (thumb_w + gap)

@@ -9,6 +9,7 @@ from typing import Any
 from PIL import Image, ImageStat
 
 from app.content.mascot_story_schemas import MascotStoryPlan
+from app.quality.visual_aesthetic_quality import analyze_visual_aesthetic_quality
 from app.render.native_reel_renderer import REEL_SIZE
 
 
@@ -16,9 +17,11 @@ def run_mascot_story_quality_gate(output_dir: Path, plan: MascotStoryPlan, metad
     media_plan = _read_json(output_dir / "media_plan.json")
     attribution = _read_json(output_dir / "media_attribution.json")
     fallback = _read_json(output_dir / "media_fallback_report.json")
+    media_quality = _read_json(output_dir / "media_quality_report.json")
     voiceover = metadata.get("voiceover", {}) if isinstance(metadata.get("voiceover", {}), dict) else {}
     render = metadata.get("mascot_story_render", {}) if isinstance(metadata.get("mascot_story_render", {}), dict) else {}
     mascot = metadata.get("mascot_consistency", {}) if isinstance(metadata.get("mascot_consistency", {}), dict) else {}
+    visual_aesthetic = analyze_visual_aesthetic_quality(output_dir, plan, metadata)
 
     blank_scene_count = _blank_scene_count(output_dir, len(plan.scenes))
     prompt_text_visible_count = int(render.get("prompt_text_visible_count", 0) or 0)
@@ -28,15 +31,24 @@ def run_mascot_story_quality_gate(output_dir: Path, plan: MascotStoryPlan, metad
     caption_layout_score = int(voiceover.get("caption_layout_score", render.get("caption_layout_score", 100 if not voiceover_requested else 0)) or 0)
     mascot_presence_score = int(mascot.get("mascot_presence_score", 92) or 92)
     mascot_consistency_score = int(mascot.get("mascot_consistency_score", 88) or 88)
-    scene_visual_completeness_score = 100 if blank_scene_count == 0 and _all_scene_visuals_exist(output_dir, len(plan.scenes)) else 60
+    visual_asset_quality_score = int(visual_aesthetic.get("visual_asset_quality_score", 0) or 0)
+    broll_or_ai_scene_quality_score = int(visual_aesthetic.get("broll_or_ai_scene_quality_score", 0) or 0)
+    scene_visual_completeness_score = (
+        min(100, max(70, visual_asset_quality_score + 8))
+        if blank_scene_count == 0 and _all_scene_visuals_exist(output_dir, len(plan.scenes))
+        else 45
+    )
     media_relevance_score = _media_relevance_score(media_plan)
     broll_quality_score = _broll_quality_score(media_plan)
-    infographic_quality_score = int(render.get("infographic_quality_score", 91) or 91)
+    infographic_quality_score = int(render.get("infographic_quality_score", 88) or 88)
+    if visual_aesthetic.get("powerpoint_chart_risk") == "high":
+        infographic_quality_score = min(infographic_quality_score, 58)
     story_clarity_score = _story_clarity_score(plan)
     explanation_value_score = 94 if plan.simple_answer and plan.analogy and plan.caveat else 72
     financial_safety_score = _financial_safety_score(plan)
     attribution_score = _attribution_score(attribution)
-    professional_edit_score = int(render.get("professional_edit_score", 90) or 90)
+    professional_edit_score = int(render.get("professional_edit_score", 82) or 82)
+    professional_edit_score = min(professional_edit_score, max(45, visual_asset_quality_score + 8))
     viral_readiness_score = round(
         mascot_presence_score * 0.10
         + story_clarity_score * 0.16
@@ -77,6 +89,26 @@ def run_mascot_story_quality_gate(output_dir: Path, plan: MascotStoryPlan, metad
         blockers.append(f"financial safety < 85: {financial_safety_score}.")
     if attribution.get("external_media_used") and attribution.get("missing_attribution_count", 0):
         blockers.append("attribution missing for external media used.")
+    for issue in visual_aesthetic.get("blocking_issues", []):
+        if isinstance(issue, str):
+            blockers.append(issue)
+    if media_quality.get("failed_scene_visual_quality_numbers"):
+        blockers.append("one or more scenes failed media visual quality.")
+    if visual_aesthetic.get("primitive_mascot_risk") == "high":
+        blockers.append("primitive mascot risk is high.")
+    if visual_aesthetic.get("placeholder_visual_risk") == "high":
+        blockers.append("placeholder visual risk is high.")
+    if visual_aesthetic.get("powerpoint_chart_risk") == "high":
+        blockers.append("PowerPoint-like chart risk is high.")
+    if visual_asset_quality_score < 75:
+        blockers.append(f"visual asset quality < 75: {visual_asset_quality_score}.")
+    if infographic_quality_score < 85:
+        blockers.append(f"infographic quality < 85: {infographic_quality_score}.")
+
+    if visual_aesthetic.get("primitive_mascot_risk") == "high" or visual_aesthetic.get("placeholder_visual_risk") == "high":
+        viral_readiness_score = min(viral_readiness_score, 40)
+    elif visual_aesthetic.get("powerpoint_chart_risk") == "high" or visual_asset_quality_score < 75:
+        viral_readiness_score = min(viral_readiness_score, 50)
 
     warnings: list[str] = []
     if mascot_consistency_score < 85:
@@ -87,6 +119,8 @@ def run_mascot_story_quality_gate(output_dir: Path, plan: MascotStoryPlan, metad
         warnings.append("too much AI imagery.")
     if infographic_quality_score < 88:
         warnings.append("chart feels static.")
+    if media_quality.get("ai_generation_required_scene_numbers"):
+        warnings.append("AI visual generation was required for scenes: " + ", ".join(str(item) for item in media_quality.get("ai_generation_required_scene_numbers", [])))
 
     report = {
         "human_review_required": True,
@@ -100,6 +134,18 @@ def run_mascot_story_quality_gate(output_dir: Path, plan: MascotStoryPlan, metad
         "scene_visual_completeness_score": scene_visual_completeness_score,
         "blank_scene_count": blank_scene_count,
         "prompt_text_visible_count": prompt_text_visible_count,
+        "flat_shape_scene_risk": visual_aesthetic.get("flat_shape_scene_risk", "low"),
+        "primitive_mascot_risk": visual_aesthetic.get("primitive_mascot_risk", "low"),
+        "empty_scene_ratio": visual_aesthetic.get("empty_scene_ratio", 0),
+        "dark_empty_area_ratio": visual_aesthetic.get("dark_empty_area_ratio", 0),
+        "cropped_text_risk": visual_aesthetic.get("cropped_text_risk", "low"),
+        "prompt_text_risk": visual_aesthetic.get("prompt_text_risk", "low"),
+        "placeholder_visual_risk": visual_aesthetic.get("placeholder_visual_risk", "low"),
+        "powerpoint_chart_risk": visual_aesthetic.get("powerpoint_chart_risk", "low"),
+        "caption_box_dominance_ratio": visual_aesthetic.get("caption_box_dominance_ratio", 0),
+        "subject_visibility_score": visual_aesthetic.get("subject_visibility_score", 0),
+        "visual_asset_quality_score": visual_asset_quality_score,
+        "broll_or_ai_scene_quality_score": broll_or_ai_scene_quality_score,
         "media_relevance_score": media_relevance_score,
         "broll_quality_score": broll_quality_score,
         "infographic_quality_score": infographic_quality_score,
@@ -118,7 +164,10 @@ def run_mascot_story_quality_gate(output_dir: Path, plan: MascotStoryPlan, metad
         "qa_contact_sheet": str(output_dir / "qa_contact_sheet.jpg"),
         "media_sources_used": media_plan.get("media_sources_used", []),
         "external_media_used": bool(media_plan.get("external_media_used", False)),
+        "external_media_files_used": media_quality.get("external_media_files_used", []),
         "missing_api_keys": fallback.get("missing_api_keys", []),
+        "visual_aesthetic_report_path": str(output_dir / "visual_aesthetic_report.json"),
+        "media_quality_report_path": str(output_dir / "media_quality_report.json"),
     }
     write_mascot_story_quality_report(output_dir, report)
     write_mascot_story_review_reports(output_dir, plan, report)
@@ -137,6 +186,12 @@ def write_mascot_story_quality_report(output_dir: Path, report: dict[str, Any]) 
         "scene_visual_completeness_score",
         "blank_scene_count",
         "prompt_text_visible_count",
+        "primitive_mascot_risk",
+        "placeholder_visual_risk",
+        "powerpoint_chart_risk",
+        "caption_box_dominance_ratio",
+        "visual_asset_quality_score",
+        "broll_or_ai_scene_quality_score",
         "media_relevance_score",
         "broll_quality_score",
         "infographic_quality_score",
@@ -170,31 +225,49 @@ def write_mascot_story_review_reports(output_dir: Path, plan: MascotStoryPlan, r
         "primary_video_path": report.get("primary_video_path", ""),
         "cover_path": report.get("cover_path", ""),
         "qa_contact_sheet_path": str(output_dir / "qa_contact_sheet.jpg"),
-        "mascot_notes": "Miko is an original tiny fox-like robot creature; prompt-level consistency MVP.",
+        "visual_aesthetic_report_path": report.get("visual_aesthetic_report_path", ""),
+        "media_quality_report_path": report.get("media_quality_report_path", ""),
+        "production_visual_minimums_passed": bool(report.get("quality_gate_passed", False)),
+        "visual_failure_checks": {
+            "primitive_mascot_risk": report.get("primitive_mascot_risk", "low"),
+            "placeholder_visual_risk": report.get("placeholder_visual_risk", "low"),
+            "powerpoint_chart_risk": report.get("powerpoint_chart_risk", "low"),
+            "text_crop_count": report.get("text_crop_count", 0),
+            "prompt_text_visible_count": report.get("prompt_text_visible_count", 0),
+            "blank_scene_count": report.get("blank_scene_count", 0),
+        },
+        "mascot_notes": "Miko must be a production bitmap/AI character, never a primitive shape drawing.",
         "media_sources_actually_used": media_plan.get("media_sources_used", []),
+        "external_media_files_used": report.get("external_media_files_used", []),
         "missing_api_key_warnings": report.get("missing_api_keys", []),
         "story_summary": plan.story_angle,
         "known_weak_points": report.get("warnings", []),
         "human_checklist": [
-            "Is Miko cute/brandable?",
-            "Is the story explanation actually interesting?",
-            "Are there any blank/empty scenes?",
-            "Any prompt text visible?",
-            "Any cropped/overlapping text?",
-            "Does it feel like a Reel, not slides?",
-            "Are B-roll and charts useful?",
-            "Would this be worth saving or sharing?",
+            "Is Miko actually high-quality and brandable?",
+            "Are there any primitive shape scenes?",
+            "Any empty/dark slides?",
+            "Any PowerPoint-like charts?",
+            "Any cropped text?",
+            "Does it feel like a premium Reel?",
+            "Is the explanation useful?",
+            "Would this be worth saving/sharing?",
         ],
     }
-    (qa_dir / "mascot_story_review_report.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    review_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    (qa_dir / "mascot_story_review_report.json").write_text(review_json, encoding="utf-8")
+    (qa_dir / "mascot_story_v2_review_report.json").write_text(review_json, encoding="utf-8")
     lines = [
         "# Mascot Story Review Report",
         "",
         f"- primary video path: {payload['primary_video_path']}",
         f"- cover path: {payload['cover_path']}",
         f"- qa contact sheet path: {payload['qa_contact_sheet_path']}",
+        f"- visual aesthetic report path: {payload['visual_aesthetic_report_path']}",
+        f"- media quality report path: {payload['media_quality_report_path']}",
+        f"- production visual minimums passed: {str(payload['production_visual_minimums_passed']).lower()}",
         f"- mascot notes: {payload['mascot_notes']}",
         f"- media sources actually used: {', '.join(str(item) for item in payload['media_sources_actually_used'])}",
+        f"- external media files used: {', '.join(str(item) for item in payload['external_media_files_used']) or 'none'}",
         f"- missing API key warnings: {', '.join(str(item) for item in payload['missing_api_key_warnings']) or 'none'}",
         f"- story summary: {payload['story_summary']}",
         "",
@@ -204,13 +277,17 @@ def write_mascot_story_review_reports(output_dir: Path, plan: MascotStoryPlan, r
     lines.extend(f"- {item}" for item in weak) if weak else lines.append("- None")
     lines.extend(["", "## Human Checklist"])
     lines.extend(f"- {item}" for item in payload["human_checklist"])
-    (qa_dir / "mascot_story_review_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    review_md = "\n".join(lines) + "\n"
+    (qa_dir / "mascot_story_review_report.md").write_text(review_md, encoding="utf-8")
+    (qa_dir / "mascot_story_v2_review_report.md").write_text(review_md, encoding="utf-8")
 
 
 def write_mascot_story_technical_report(output_dir: Path, technical: dict[str, Any]) -> None:
     qa_dir = output_dir.parents[1] / "qa" if len(output_dir.parents) >= 2 else output_dir / "qa"
     qa_dir.mkdir(parents=True, exist_ok=True)
-    (qa_dir / "mascot_story_technical_report.json").write_text(json.dumps(technical, ensure_ascii=False, indent=2), encoding="utf-8")
+    technical_json = json.dumps(technical, ensure_ascii=False, indent=2)
+    (qa_dir / "mascot_story_technical_report.json").write_text(technical_json, encoding="utf-8")
+    (qa_dir / "mascot_story_v2_technical_report.json").write_text(technical_json, encoding="utf-8")
     lines = ["# Mascot Story Technical Report", ""]
     for key, value in technical.items():
         if isinstance(value, (dict, list)):
@@ -218,7 +295,9 @@ def write_mascot_story_technical_report(output_dir: Path, technical: dict[str, A
         elif isinstance(value, bool):
             value = str(value).lower()
         lines.append(f"- {key}: {value}")
-    (qa_dir / "mascot_story_technical_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    technical_md = "\n".join(lines) + "\n"
+    (qa_dir / "mascot_story_technical_report.md").write_text(technical_md, encoding="utf-8")
+    (qa_dir / "mascot_story_v2_technical_report.md").write_text(technical_md, encoding="utf-8")
 
 
 def _story_clarity_score(plan: MascotStoryPlan) -> int:
@@ -311,4 +390,3 @@ def _image_is_size(path: Path, expected: tuple[int, int]) -> bool:
             return image.size == expected
     except Exception:
         return False
-

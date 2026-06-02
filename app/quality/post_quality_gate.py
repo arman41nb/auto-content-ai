@@ -206,6 +206,28 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         for issue in _string_list(native_reel_quality.get("blocking_issues", [])):
             blocking.append(issue)
 
+    mascot_story_quality = metadata.get("mascot_story_quality", {})
+    if isinstance(mascot_story_quality, dict) and mascot_story_quality:
+        if not bool(mascot_story_quality.get("quality_gate_passed", False)):
+            blocking.append("Mascot story production visual quality gate failed.")
+            score -= 18
+        if bool(mascot_story_quality.get("human_review_required", False)) and str(metadata.get("human_review_status", "")).lower() != "approved":
+            blocking.append("Mascot story requires human review before posting.")
+            score -= 8
+        if mascot_story_quality.get("primitive_mascot_risk") == "high":
+            blocking.append("Mascot story primitive mascot risk is high.")
+            score -= 18
+        if mascot_story_quality.get("placeholder_visual_risk") == "high":
+            blocking.append("Mascot story placeholder visual risk is high.")
+            score -= 16
+        if mascot_story_quality.get("powerpoint_chart_risk") == "high":
+            blocking.append("Mascot story PowerPoint-like chart risk is high.")
+            score -= 12
+        visual_asset_quality = int(mascot_story_quality.get("visual_asset_quality_score", 100) or 0)
+        if visual_asset_quality < 75:
+            blocking.append(f"Mascot story visual asset quality is below threshold: {visual_asset_quality}.")
+            score -= 14
+
     design = _design_quality_report(output_dir, existing_final, metadata)
     warnings.extend(design["amateur_template_warnings"])
     if design["design_score"] < 70:
@@ -236,6 +258,19 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
             "intentional_overlay_text_present": bool(metadata.get("intentional_overlay_text_present", False)),
             "publish_blocking_image_warnings": publish_blocking_image_warnings,
             "native_reel_quality": native_reel_quality if isinstance(native_reel_quality, dict) else {},
+            "mascot_story_quality": mascot_story_quality if isinstance(mascot_story_quality, dict) else {},
+            "mascot_story_visual_asset_quality_score": mascot_story_quality.get("visual_asset_quality_score", 0)
+            if isinstance(mascot_story_quality, dict)
+            else 0,
+            "mascot_story_primitive_mascot_risk": mascot_story_quality.get("primitive_mascot_risk", "")
+            if isinstance(mascot_story_quality, dict)
+            else "",
+            "mascot_story_placeholder_visual_risk": mascot_story_quality.get("placeholder_visual_risk", "")
+            if isinstance(mascot_story_quality, dict)
+            else "",
+            "mascot_story_powerpoint_chart_risk": mascot_story_quality.get("powerpoint_chart_risk", "")
+            if isinstance(mascot_story_quality, dict)
+            else "",
             "native_reel_score": native_reel_quality.get("native_reel_score", 0)
             if isinstance(native_reel_quality, dict)
             else 0,
