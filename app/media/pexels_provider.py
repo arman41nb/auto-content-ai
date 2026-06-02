@@ -20,6 +20,8 @@ class PexelsProvider(MediaProvider):
     def search(self, query: str, media_type: str = "photo", limit: int = 5) -> list[MediaItem]:
         if not self.api_key:
             return []
+        if media_type == "video":
+            return self._search_videos(query, limit)
         endpoint = "https://api.pexels.com/v1/search"
         params = {"query": query, "per_page": min(limit, 15), "orientation": "portrait"}
         try:
@@ -44,6 +46,50 @@ class PexelsProvider(MediaProvider):
                     license="Pexels License",
                     license_url="https://www.pexels.com/license/",
                     attribution=f"Photo by {photo.get('photographer', 'Pexels')} on Pexels",
+                )
+            )
+        return items
+
+    def _search_videos(self, query: str, limit: int = 5) -> list[MediaItem]:
+        endpoint = "https://api.pexels.com/videos/search"
+        params = {"query": query, "per_page": min(limit, 15), "orientation": "portrait"}
+        try:
+            response = requests.get(endpoint, headers={"Authorization": self.api_key}, params=params, timeout=self.timeout_seconds)
+            response.raise_for_status()
+        except requests.RequestException:
+            return []
+        items: list[MediaItem] = []
+        for video in response.json().get("videos", []):
+            files = video.get("video_files", []) if isinstance(video, dict) else []
+            best_url = ""
+            best_width = int(video.get("width", 0) or 0)
+            best_height = int(video.get("height", 0) or 0)
+            if isinstance(files, list):
+                ranked = sorted(
+                    [item for item in files if isinstance(item, dict) and item.get("link")],
+                    key=lambda item: (int(item.get("height", 0) or 0), int(item.get("width", 0) or 0)),
+                    reverse=True,
+                )
+                if ranked:
+                    best = ranked[0]
+                    best_url = str(best.get("link", ""))
+                    best_width = int(best.get("width", best_width) or best_width)
+                    best_height = int(best.get("height", best_height) or best_height)
+            user = video.get("user", {}) if isinstance(video.get("user", {}), dict) else {}
+            items.append(
+                MediaItem(
+                    provider=self.name,
+                    media_type="stock_video",
+                    title=str(video.get("url", "") or query),
+                    url=str(video.get("url", "")),
+                    download_url=best_url,
+                    width=best_width,
+                    height=best_height,
+                    author=str(user.get("name", "")),
+                    author_url=str(user.get("url", "")),
+                    license="Pexels License",
+                    license_url="https://www.pexels.com/license/",
+                    attribution=f"Video by {user.get('name', 'Pexels')} on Pexels",
                 )
             )
         return items

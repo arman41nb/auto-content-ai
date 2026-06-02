@@ -16,8 +16,8 @@ SceneTransition = Literal["cut", "fade"]
 class ReelScene(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    scene_number: int = Field(..., ge=1, le=5)
-    duration_seconds: float = Field(..., ge=1.4, le=3.0)
+    scene_number: int = Field(..., ge=1, le=9)
+    duration_seconds: float = Field(..., ge=1.4, le=4.8)
     visual_prompt: str = Field(..., min_length=1, max_length=1000)
     on_screen_text: str = Field(..., min_length=1, max_length=80)
     voiceover_line: str = Field(..., min_length=1, max_length=180)
@@ -58,7 +58,7 @@ class ReelPlan(BaseModel):
     niche: str = Field(..., min_length=1, max_length=80)
     title: str = Field(..., min_length=1, max_length=160)
     cover_text: str = Field(..., min_length=1, max_length=80)
-    scenes: list[ReelScene] = Field(..., min_length=5, max_length=5)
+    scenes: list[ReelScene] = Field(..., min_length=5, max_length=9)
 
     @field_validator("topic", "niche", "title", "cover_text")
     @classmethod
@@ -68,11 +68,18 @@ class ReelPlan(BaseModel):
     @model_validator(mode="after")
     def validate_story_shape(self) -> "ReelPlan":
         actual = [scene.scene_number for scene in self.scenes]
-        if actual != [1, 2, 3, 4, 5]:
-            raise ValueError(f"Scene numbers must be 1..5. Got {actual}.")
+        expected = list(range(1, len(self.scenes) + 1))
+        if actual != expected:
+            raise ValueError(f"Scene numbers must be consecutive from 1. Got {actual}.")
         total_duration = sum(scene.duration_seconds for scene in self.scenes)
-        if not 8.0 <= total_duration <= 12.0:
-            raise ValueError(f"Total duration must be 8-12 seconds. Got {total_duration:.1f}.")
+        if len(self.scenes) == 5:
+            if not 8.0 <= total_duration <= 12.0:
+                raise ValueError(f"Total duration must be 8-12 seconds. Got {total_duration:.1f}.")
+        elif 7 <= len(self.scenes) <= 9:
+            if not 22.0 <= total_duration <= 35.0:
+                raise ValueError(f"Total duration must be 22-35 seconds. Got {total_duration:.1f}.")
+        else:
+            raise ValueError("ReelPlan must contain either 5 native scenes or 7-9 explainer scenes.")
         voiceover_words = count_words(" ".join(scene.voiceover_line for scene in self.scenes))
         if not 25 <= voiceover_words <= 105:
             raise ValueError(f"Total voiceover must be 25-105 words. Got {voiceover_words}.")

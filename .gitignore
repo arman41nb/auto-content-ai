@@ -31,6 +31,7 @@ outputs/tmp*/
 *.png
 
 host_assets/
+assets/mascots/
 
 .DS_Store
 Thumbs.db

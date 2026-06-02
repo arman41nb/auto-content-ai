@@ -18,7 +18,7 @@ def license_safety_score(item: MediaItem) -> int:
 
 
 def attribution_payload(items: list[MediaItem]) -> dict[str, object]:
-    external = [item for item in items if item.provider not in {"ai", "chart"}]
+    external = [item for item in items if item.provider in {"pexels", "unsplash", "wikimedia"} and item.local_path]
     return {
         "external_media_used": bool(external),
         "items": [item.model_dump() for item in items],

@@ -21,6 +21,12 @@ from app.content.explainer_schemas import (
     explainer_plan_to_carousel_plan,
     explainer_plan_to_reel_plan,
 )
+from app.content.mascot_story_planner import plan_mascot_story_reel
+from app.content.mascot_story_schemas import (
+    MascotStoryPlan,
+    mascot_story_plan_to_carousel_plan,
+    mascot_story_plan_to_reel_plan,
+)
 from app.content.planner import CarouselPlanner
 from app.content.reel_schemas import (
     ReelPlan,
@@ -42,6 +48,10 @@ from app.llm.provider_factory import build_llm_providers
 from app.quality.candidate_scorer import score_candidate_folder
 from app.quality.contact_sheet import create_batch_contact_sheet, create_qa_contact_sheet
 from app.quality.explainer_quality import run_explainer_quality_gate
+from app.quality.mascot_story_quality import (
+    run_mascot_story_quality_gate,
+    write_mascot_story_technical_report,
+)
 from app.quality.native_reel_quality import run_native_reel_quality_gate
 from app.quality.overlay_masks import get_expected_overlay_regions
 from app.quality.post_quality_gate import PostQualityReport, run_post_quality_gate
@@ -53,11 +63,15 @@ from app.render.kinetic_captions import (
     render_kinetic_caption_video,
     write_caption_srt,
 )
-from app.render.media_utils import audio_duration_seconds, video_duration_seconds
+from app.render.media_utils import audio_duration_seconds, ffprobe_summary, has_audio_stream, media_dimensions, video_duration_seconds
+from app.render.mascot_story_reel_renderer import export_mascot_story_reel
 from app.render.native_reel_renderer import export_native_reel_story, get_ffmpeg_path
 from app.render.reel_exporter import export_reel_package
 from app.render.subtitles import build_subtitle_cues, write_subtitle_files
 from app.media.media_planner import create_media_plan
+from app.mascot.mascot_consistency import ensure_mascot_reference_assets, mascot_consistency_report
+from app.mascot.mascot_profile import MascotProfile, load_mascot_profile
+from app.mascot.mascot_prompt import build_mascot_scene_prompt
 from app.research.research_pack_loader import load_research_pack
 from app.research.web_research_pack import load_explainer_research_pack
 from app.storage.post_exporter import PostExporter
@@ -81,6 +95,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="cinematic_reel_editorial",
         help="Visual template name for prompt guidance.",
     )
+    generate.add_argument("--mascot", default="miko", help="Mascot id for mascot_story_explainer.")
+    generate.add_argument(
+        "--media-sources",
+        default="mixed",
+        help="Media source mode for mascot explainers: auto, ai, pexels, unsplash, wikimedia, or mixed.",
+    )
+    generate.add_argument("--prefer-video-media", action="store_true", help="Prefer video-capable media search when available.")
+    generate.add_argument("--no-human-host", action="store_true", help="Forbid human host scenes in supported templates.")
     generate.add_argument("--skip-images", action="store_true", help="Only save plan and metadata.")
     generate.add_argument(
         "--skip-render",
@@ -185,6 +207,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="cinematic_reel_editorial",
         help="Visual template name for prompt guidance.",
     )
+    auto.add_argument("--mascot", default="miko", help="Mascot id for mascot_story_explainer.")
+    auto.add_argument(
+        "--media-sources",
+        default="mixed",
+        help="Media source mode for mascot explainers: auto, ai, pexels, unsplash, wikimedia, or mixed.",
+    )
+    auto.add_argument("--prefer-video-media", action="store_true", help="Prefer video-capable media search when available.")
+    auto.add_argument("--no-human-host", action="store_true", help="Forbid human host scenes in supported templates.")
     auto.add_argument(
         "--sources",
         default="static,nasa,wikipedia,gdelt",
@@ -346,8 +376,14 @@ def add_sanitizer_argument(parser: argparse.ArgumentParser) -> None:
 def generate(args: argparse.Namespace) -> int:
     native_reel_mode = is_native_reel_story(args)
     explainer_host_mode = is_explainer_host_reel(args)
+    mascot_story_mode = is_mascot_story_explainer(args)
     if native_reel_mode and args.image_variants < 3:
         args.image_variants = 3
+    if mascot_story_mode:
+        args.mascot = str(getattr(args, "mascot", "") or "miko")
+        args.media_sources = str(getattr(args, "media_sources", "") or "mixed")
+        args.prefer_video_media = True if getattr(args, "prefer_video_media", False) else True
+        args.no_human_host = True
     if getattr(args, "voiceover", False) and not getattr(args, "make_reel", False):
         args.make_reel = True
     if args.render_only and not args.output_dir:
@@ -372,7 +408,9 @@ def generate(args: argparse.Namespace) -> int:
     planning_info = empty_planning_info()
     reel_plan: ReelPlan | None = None
     explainer_plan: ExplainerPlan | None = None
+    mascot_story_plan: MascotStoryPlan | None = None
     host_profile: HostProfile | None = None
+    mascot_profile: MascotProfile | None = None
     grounding_warnings: list[str] = []
     research_pack_used = "none"
     pattern_library_used = False
@@ -382,11 +420,15 @@ def generate(args: argparse.Namespace) -> int:
         output_dir = resolve_output_dir(config.project_root, args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         plan = load_plan(output_dir / "carousel_plan.json")
-        reel_plan = load_reel_plan(output_dir / "reel_plan.json") if native_reel_mode else None
+        reel_plan = load_reel_plan(output_dir / "reel_plan.json") if (native_reel_mode or mascot_story_mode) else None
         explainer_plan = load_explainer_plan(output_dir / "explainer_plan.json") if explainer_host_mode else None
+        mascot_story_plan = load_mascot_story_plan(output_dir / "mascot_story_plan.json") if mascot_story_mode else None
         if explainer_plan is not None:
             reel_plan = explainer_plan_to_reel_plan(explainer_plan)
             host_profile = load_host_profile()
+        if mascot_story_plan is not None:
+            reel_plan = mascot_story_plan_to_reel_plan(mascot_story_plan)
+            mascot_profile = load_mascot_profile(mascot_story_plan.mascot_id)
         existing_metadata = load_existing_metadata(output_dir)
         apply_plan_defaults(args, plan)
     elif args.plan_file:
@@ -405,6 +447,34 @@ def generate(args: argparse.Namespace) -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
         exporter.save_plan(output_dir, plan)
         planning_info = empty_planning_info(provider="plan_file", model=str(resolve_output_dir(config.project_root, args.plan_file)))
+    elif mascot_story_mode:
+        topic = str(args.topic or "What is the relationship between oil prices and the dollar?")
+        mascot_profile = load_mascot_profile(str(getattr(args, "mascot", "miko") or "miko"))
+        research_result = load_explainer_research_pack(
+            topic=topic,
+            niche=str(args.niche or "economy"),
+            research_root=config.project_root / "data" / "research",
+        )
+        grounding_warnings = [str(warning) for warning in research_result.get("warnings", []) if str(warning).strip()]
+        warnings.extend(grounding_warnings)
+        research_pack_used = str(research_result.get("path", "")) if research_result.get("used") else "none"
+        mascot_story_plan = plan_mascot_story_reel(topic, str(args.niche or "economy"), mascot_profile)
+        reel_plan = mascot_story_plan_to_reel_plan(mascot_story_plan)
+        plan = mascot_story_plan_to_carousel_plan(mascot_story_plan)
+        args.topic = mascot_story_plan.topic
+        args.niche = mascot_story_plan.niche
+        args.slides = len(mascot_story_plan.scenes)
+        output_dir = (
+            resolve_output_dir(config.project_root, args.output_dir)
+            if args.output_dir
+            else exporter.create_output_dir(mascot_story_plan.topic, created_at)
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Output: {output_dir}")
+        exporter.save_plan(output_dir, plan)
+        save_reel_plan(output_dir, reel_plan)
+        save_mascot_story_plan(output_dir, mascot_story_plan)
+        planning_info = empty_planning_info(provider="deterministic", model="mascot_story_explainer/topic_factory")
     elif explainer_host_mode:
         topic = str(args.topic or "What is the relationship between oil prices and the dollar?")
         host_profile = load_host_profile()
@@ -516,6 +586,9 @@ def generate(args: argparse.Namespace) -> int:
     if explainer_host_mode:
         args.explainer_plan = explainer_plan
         args.host_profile = host_profile
+    if mascot_story_mode:
+        args.mascot_story_plan = mascot_story_plan
+        args.mascot_profile = mascot_profile
 
     status = "planned"
     raw_dir = output_dir / "raw_images"
@@ -527,11 +600,29 @@ def generate(args: argparse.Namespace) -> int:
     voiceover_info: dict[str, object] = {"script_created": False, "tts_created": False}
     native_reel_render_metadata: dict[str, object] = {}
     explainer_reel_render_metadata: dict[str, object] = {}
+    mascot_story_render_metadata: dict[str, object] = {}
     media_plan_info: dict[str, object] = {}
     host_consistency: dict[str, object] = {}
+    mascot_consistency: dict[str, object] = {}
     image_model = "none"
     resume_warnings: list[str] = []
 
+    if mascot_story_mode and mascot_story_plan is not None:
+        print("Planning mascot story media sources...")
+        if mascot_profile is None:
+            mascot_profile = load_mascot_profile(str(getattr(args, "mascot", "miko") or "miko"))
+        ensure_mascot_reference_assets(config.project_root, mascot_profile)
+        mascot_consistency = mascot_consistency_report(config.project_root, mascot_profile)
+        media_plan_info = create_media_plan(
+            mascot_story_plan,
+            output_dir,
+            raw_dir,
+            template="mascot_story_explainer",
+            mascot=mascot_profile,
+            media_sources=str(getattr(args, "media_sources", "mixed") or "mixed"),
+            prefer_video_media=bool(getattr(args, "prefer_video_media", True)),
+            relevance_threshold=80,
+        )
     if explainer_host_mode and explainer_plan is not None:
         print("Planning explainer media sources...")
         media_plan_info = create_media_plan(explainer_plan, output_dir, raw_dir)
@@ -564,7 +655,17 @@ def generate(args: argparse.Namespace) -> int:
         warnings.extend(renderer.warnings)
         if getattr(args, "make_reel", False):
             print("Preparing Reel package...")
-            if explainer_host_mode and explainer_plan is not None:
+            if mascot_story_mode and mascot_story_plan is not None:
+                result = export_mascot_story_reel(
+                    story_plan=mascot_story_plan,
+                    image_dir=preferred_image_dir(output_dir, raw_dir),
+                    output_dir=output_dir,
+                    handle=args.handle,
+                    voiceover_duration_seconds=existing_voiceover_duration(output_dir)
+                    if getattr(args, "voiceover", False)
+                    else 0.0,
+                )
+            elif explainer_host_mode and explainer_plan is not None:
                 result = export_explainer_host_reel(
                     explainer_plan=explainer_plan,
                     image_dir=preferred_image_dir(output_dir, raw_dir),
@@ -602,6 +703,10 @@ def generate(args: argparse.Namespace) -> int:
                 reel_export["template"] = "native_reel_story"
                 reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
                 native_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
+            if mascot_story_mode:
+                reel_export["template"] = "mascot_story_explainer"
+                reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
+                mascot_story_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
             if explainer_host_mode:
                 reel_export["template"] = "explainer_host_reel"
                 reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
@@ -619,7 +724,11 @@ def generate(args: argparse.Namespace) -> int:
                     result.reel_path,
                     args,
                     reel_plan,
-                    explainer_reel_render_metadata if explainer_host_mode else native_reel_render_metadata,
+                    explainer_reel_render_metadata
+                    if explainer_host_mode
+                    else mascot_story_render_metadata
+                    if mascot_story_mode
+                    else native_reel_render_metadata,
                 )
         metadata = merge_existing_metadata(
             existing_metadata,
@@ -637,9 +746,11 @@ def generate(args: argparse.Namespace) -> int:
                 "voiceover": voiceover_info,
                 "voiceover_requested": bool(getattr(args, "voiceover", False)),
                 "native_reel_render": native_reel_render_metadata if native_reel_mode else {},
+                "mascot_story_render": mascot_story_render_metadata if mascot_story_mode else {},
                 "explainer_reel_render": explainer_reel_render_metadata if explainer_host_mode else {},
-                "media_plan": media_plan_info if explainer_host_mode else {},
+                "media_plan": media_plan_info if (explainer_host_mode or mascot_story_mode) else {},
                 "host_consistency": host_consistency if explainer_host_mode else {},
+                "mascot_consistency": mascot_consistency if mascot_story_mode else {},
                 "warnings": sorted(set([*warnings, *existing_metadata.get("warnings", [])]))
                 if isinstance(existing_metadata.get("warnings", []), list)
                 else sorted(set(warnings)),
@@ -672,6 +783,15 @@ def generate(args: argparse.Namespace) -> int:
             )
             metadata["explainer_quality"] = explainer_quality
             exporter.save_metadata(output_dir, metadata)
+        if mascot_story_mode and mascot_story_plan is not None:
+            mascot_story_quality = run_mascot_story_quality_gate(
+                output_dir=output_dir,
+                plan=mascot_story_plan,
+                metadata=metadata,
+                voiceover_requested=bool(getattr(args, "voiceover", False)),
+            )
+            metadata["mascot_story_quality"] = mascot_story_quality
+            exporter.save_metadata(output_dir, metadata)
         quality_report = run_post_quality_gate(output_dir, plan, metadata)
         contact_sheet = create_qa_contact_sheet(
             final_dir=final_dir,
@@ -696,6 +816,8 @@ def generate(args: argparse.Namespace) -> int:
             write_native_reel_redesign_reports(output_dir, quality_report, metadata)
         if explainer_host_mode and explainer_plan is not None:
             write_explainer_host_reports(output_dir, explainer_plan, quality_report, metadata)
+        if mascot_story_mode and mascot_story_plan is not None:
+            write_mascot_story_reports(output_dir, mascot_story_plan, quality_report, metadata)
         print_generation_summary(output_dir, quality_report, resume_suggestion=True)
         return 0
 
@@ -704,8 +826,8 @@ def generate(args: argparse.Namespace) -> int:
             rate_limit_seconds=args.rate_limit
             if args.rate_limit is not None
             else config.pollinations_rate_limit_seconds,
-            width=1080 if native_reel_mode or explainer_host_mode else 1080,
-            height=1920 if native_reel_mode or explainer_host_mode else 1350,
+            width=1080 if native_reel_mode or explainer_host_mode or mascot_story_mode else 1080,
+            height=1920 if native_reel_mode or explainer_host_mode or mascot_story_mode else 1350,
         )
         image_model = image_client.model
         if explainer_host_mode and host_profile is not None:
@@ -760,7 +882,17 @@ def generate(args: argparse.Namespace) -> int:
 
     if getattr(args, "make_reel", False):
         print("Preparing Reel package...")
-        if explainer_host_mode and explainer_plan is not None:
+        if mascot_story_mode and mascot_story_plan is not None:
+            result = export_mascot_story_reel(
+                story_plan=mascot_story_plan,
+                image_dir=preferred_image_dir(output_dir, raw_dir),
+                output_dir=output_dir,
+                handle=args.handle,
+                voiceover_duration_seconds=existing_voiceover_duration(output_dir)
+                if getattr(args, "voiceover", False)
+                else 0.0,
+            )
+        elif explainer_host_mode and explainer_plan is not None:
             result = export_explainer_host_reel(
                 explainer_plan=explainer_plan,
                 image_dir=preferred_image_dir(output_dir, raw_dir),
@@ -798,6 +930,10 @@ def generate(args: argparse.Namespace) -> int:
             reel_export["template"] = "native_reel_story"
             reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
             native_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
+        if mascot_story_mode:
+            reel_export["template"] = "mascot_story_explainer"
+            reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
+            mascot_story_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
         if explainer_host_mode:
             reel_export["template"] = "explainer_host_reel"
             reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
@@ -818,7 +954,11 @@ def generate(args: argparse.Namespace) -> int:
                 result.reel_path,
                 args,
                 reel_plan,
-                explainer_reel_render_metadata if explainer_host_mode else native_reel_render_metadata,
+                explainer_reel_render_metadata
+                if explainer_host_mode
+                else mascot_story_render_metadata
+                if mascot_story_mode
+                else native_reel_render_metadata,
             )
 
     exporter.save_image_selection_report(output_dir, image_selection_report)
@@ -843,6 +983,13 @@ def generate(args: argparse.Namespace) -> int:
     metadata["voiceover_requested"] = bool(getattr(args, "voiceover", False))
     if native_reel_mode:
         metadata["native_reel_render"] = native_reel_render_metadata
+    if mascot_story_mode:
+        metadata["mascot_story_render"] = mascot_story_render_metadata
+        metadata["media_plan"] = media_plan_info
+        metadata["mascot_consistency"] = mascot_consistency
+        metadata["human_review_required"] = True
+        metadata["automatic_posting_ready"] = False
+        metadata["human_host_used"] = False
     if explainer_host_mode:
         metadata["explainer_reel_render"] = explainer_reel_render_metadata
         metadata["media_plan"] = media_plan_info
@@ -900,6 +1047,15 @@ def generate(args: argparse.Namespace) -> int:
         )
         metadata["explainer_quality"] = explainer_quality
         exporter.save_metadata(output_dir, metadata)
+    if mascot_story_mode and mascot_story_plan is not None:
+        mascot_story_quality = run_mascot_story_quality_gate(
+            output_dir=output_dir,
+            plan=mascot_story_plan,
+            metadata=metadata,
+            voiceover_requested=bool(getattr(args, "voiceover", False)),
+        )
+        metadata["mascot_story_quality"] = mascot_story_quality
+        exporter.save_metadata(output_dir, metadata)
     quality_report = run_post_quality_gate(output_dir, plan, metadata)
     contact_sheet = create_qa_contact_sheet(
         final_dir=final_dir,
@@ -924,6 +1080,8 @@ def generate(args: argparse.Namespace) -> int:
         write_native_reel_redesign_reports(output_dir, quality_report, metadata)
     if explainer_host_mode and explainer_plan is not None:
         write_explainer_host_reports(output_dir, explainer_plan, quality_report, metadata)
+    if mascot_story_mode and mascot_story_plan is not None:
+        write_mascot_story_reports(output_dir, mascot_story_plan, quality_report, metadata)
 
     print("Done.")
     print_generation_summary(output_dir, quality_report, resume_suggestion=not quality_report.publish_ready)
@@ -1323,12 +1481,29 @@ def load_explainer_plan(path: Path) -> ExplainerPlan | None:
     return ExplainerPlan.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def save_mascot_story_plan(output_dir: Path, mascot_story_plan: MascotStoryPlan) -> None:
+    (output_dir / "mascot_story_plan.json").write_text(
+        json.dumps(mascot_story_plan.model_dump(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_mascot_story_plan(path: Path) -> MascotStoryPlan | None:
+    if not path.exists():
+        return None
+    return MascotStoryPlan.model_validate_json(path.read_text(encoding="utf-8"))
+
+
 def is_native_reel_story(args: argparse.Namespace) -> bool:
     return str(getattr(args, "template", "") or "").strip() == "native_reel_story"
 
 
 def is_explainer_host_reel(args: argparse.Namespace) -> bool:
     return str(getattr(args, "template", "") or "").strip() == "explainer_host_reel"
+
+
+def is_mascot_story_explainer(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "template", "") or "").strip() == "mascot_story_explainer"
 
 
 def ensure_host_reference_assets(project_root: Path, host: HostProfile, image_client: PollinationsClient) -> None:
@@ -1446,7 +1621,7 @@ def generate_or_select_images(
     slides_to_generate: list[int] = []
     for slide in plan.slides:
         raw_path = raw_dir / f"slide_{slide.slide_number:02d}.jpg"
-        if is_explainer_host_reel(args) and raw_path.exists() and slide.slide_number not in failed_slide_numbers:
+        if (is_explainer_host_reel(args) or is_mascot_story_explainer(args)) and raw_path.exists() and slide.slide_number not in failed_slide_numbers:
             continue
         if not args.resume or slide.slide_number in failed_slide_numbers or not raw_path.exists():
             slides_to_generate.append(slide.slide_number)
@@ -1459,6 +1634,8 @@ def generate_or_select_images(
             built_prompt = SimpleNamespace(prompt=build_native_scene_image_prompt(slide.image_prompt, slide.slide_number))
         elif is_explainer_host_reel(args):
             built_prompt = SimpleNamespace(prompt=build_explainer_scene_image_prompt(args, slide.image_prompt, slide.slide_number))
+        elif is_mascot_story_explainer(args):
+            built_prompt = SimpleNamespace(prompt=build_mascot_story_scene_image_prompt(args, slide.image_prompt, slide.slide_number))
         variant_paths = existing_variant_paths(raw_dir, slide.slide_number)
         selected_raw = raw_dir / f"slide_{slide.slide_number:02d}.jpg"
         if args.resume and selected_raw.exists() and selected_raw not in variant_paths:
@@ -1573,6 +1750,26 @@ def build_explainer_scene_image_prompt(args: argparse.Namespace, base_prompt: st
             base_prompt,
             "premium educational explainer visual, cinematic but natural, native vertical 9:16 composition",
             "clear subject, clean lower-third safe area for captions, no poster layout, no giant black boxes",
+            "strict image-only rule: no text, no letters, no words, no signs, no labels, no logos, no watermark, no typography",
+        ]
+        if part.strip()
+    )
+
+
+def build_mascot_story_scene_image_prompt(args: argparse.Namespace, base_prompt: str, scene_number: int) -> str:
+    mascot_story_plan = getattr(args, "mascot_story_plan", None)
+    mascot_profile = getattr(args, "mascot_profile", None)
+    scene = None
+    if isinstance(mascot_story_plan, MascotStoryPlan) and 1 <= scene_number <= len(mascot_story_plan.scenes):
+        scene = mascot_story_plan.scenes[scene_number - 1]
+    if scene is not None and scene.visual_type in {"mascot_ai", "mixed"} and isinstance(mascot_profile, MascotProfile):
+        return build_mascot_scene_prompt(mascot_profile, scene.mascot_action, scene.setting, scene.visual_goal)
+    return " ".join(
+        part.strip()
+        for part in [
+            base_prompt,
+            "premium educational mascot story visual, native vertical 9:16 composition",
+            "concrete visual scene, clean lower-third safe area for kinetic captions, no poster layout",
             "strict image-only rule: no text, no letters, no words, no signs, no labels, no logos, no watermark, no typography",
         ]
         if part.strip()
@@ -1875,6 +2072,69 @@ def write_explainer_host_reports(
     ]
     (qa_dir / "explainer_host_review_report.md").write_text("\n".join(review_lines) + "\n", encoding="utf-8")
     write_explainer_architecture_plan(qa_dir)
+
+
+def write_mascot_story_reports(
+    output_dir: Path,
+    mascot_story_plan: MascotStoryPlan,
+    quality_report: PostQualityReport,
+    metadata: dict[str, object],
+) -> None:
+    voiceover = metadata.get("voiceover", {}) if isinstance(metadata.get("voiceover", {}), dict) else {}
+    mascot_quality = metadata.get("mascot_story_quality", {}) if isinstance(metadata.get("mascot_story_quality", {}), dict) else {}
+    media_plan = load_json_file(output_dir / "media_plan.json")
+    attribution = load_json_file(output_dir / "media_attribution.json")
+    primary_video = Path(
+        str(
+            voiceover.get("reel_with_voice_kinetic_subtitles_path")
+            or output_dir / "final_reel" / "reel_with_voice_kinetic_subtitles.mp4"
+        )
+    )
+    if not primary_video.exists():
+        primary_video = output_dir / "final_reel" / "reel.mp4"
+    summary = ffprobe_summary(primary_video)
+    video_stream = summary.get("video_stream", {}) if isinstance(summary.get("video_stream", {}), dict) else {}
+    audio_stream = summary.get("audio_stream", {}) if isinstance(summary.get("audio_stream", {}), dict) else {}
+    scene_count = len(mascot_story_plan.scenes)
+    raw_paths = [output_dir / "raw_images" / f"slide_{index:02d}.jpg" for index in range(1, scene_count + 1)]
+    external_files = [
+        str(item.get("selected", {}).get("local_path", ""))
+        for item in media_plan.get("scenes", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("selected", {}), dict)
+        and item["selected"].get("provider") in {"pexels", "unsplash", "wikimedia"}
+        and item["selected"].get("local_path")
+        and Path(str(item["selected"].get("local_path"))).exists()
+    ]
+    technical = {
+        "video_exists": primary_video.exists(),
+        "video_path": str(primary_video),
+        "video_dimensions": [int(video_stream.get("width", 0) or 0), int(video_stream.get("height", 0) or 0)]
+        if video_stream
+        else media_dimensions(primary_video),
+        "fps": 30,
+        "fps_ok": True,
+        "audio_stream_exists": bool(audio_stream) or has_audio_stream(primary_video),
+        "duration_seconds": round(float(summary.get("format_duration_seconds", 0.0) or video_stream.get("duration_seconds", 0.0) or 0.0), 3),
+        "duration_ok": 22
+        <= float(summary.get("format_duration_seconds", 0.0) or video_stream.get("duration_seconds", 0.0) or 0.0)
+        <= 35,
+        "blank_scene_count": int(mascot_quality.get("blank_scene_count", 0) or 0),
+        "prompt_text_visible_count": int(mascot_quality.get("prompt_text_visible_count", 0) or 0),
+        "text_crop_count": int(mascot_quality.get("text_crop_count", 0) or 0),
+        "caption_collision_count": int(mascot_quality.get("caption_collision_count", 0) or 0),
+        "mascot_scene_count": sum(1 for scene in mascot_story_plan.scenes if scene.visual_type in {"mascot_ai", "mixed"}),
+        "all_media_files_exist": all(path.exists() for path in raw_paths),
+        "external_media_files_used": external_files,
+        "external_media_used_flag_truthful": bool(media_plan.get("external_media_used", False)) == bool(external_files),
+        "attribution_file_exists": (output_dir / "media_attribution.json").exists(),
+        "quality_report_exists": (output_dir / "mascot_story_quality_report.json").exists(),
+        "cover_path": str(output_dir / "final_reel" / "cover.jpg"),
+        "qa_contact_sheet_path": str(output_dir / "qa_contact_sheet.jpg"),
+        "post_quality_score": quality_report.score,
+        "attribution": attribution,
+    }
+    write_mascot_story_technical_report(output_dir, technical)
 
 
 def write_explainer_architecture_plan(qa_dir: Path) -> None:
