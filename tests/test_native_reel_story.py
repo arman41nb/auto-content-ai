@@ -66,6 +66,7 @@ class NativeReelStoryTests(unittest.TestCase):
         self.assertTrue(auto_args.voiceover)
         self.assertEqual(auto_args.tts_provider, "none")
         self.assertTrue(generate_args.voiceover)
+        self.assertEqual(generate_args.sanitizer_mode, "targeted")
 
     def test_native_renderer_writes_cover_and_scene_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -88,6 +89,34 @@ class NativeReelStoryTests(unittest.TestCase):
 
         self.assertEqual(cover_size, (1080, 1920))
         self.assertEqual(frame_sizes, [(1080, 1920)] * 5)
+
+    def test_native_renderer_disables_legacy_subtitle_video_layer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            raw_dir = root / "raw_images"
+            raw_dir.mkdir()
+            for index in range(1, 6):
+                Image.new("RGB", (1080, 1920), (40 + index * 20, 70, 100)).save(raw_dir / f"slide_{index:02d}.jpg")
+
+            def fake_render(*args, **kwargs):
+                output_path = Path(str(kwargs["output_path"]))
+                output_path.write_bytes(b"fake")
+                return subprocess.CompletedProcess(args=[], returncode=0)
+
+            with patch("app.render.native_reel_renderer.get_ffmpeg_path", return_value="ffmpeg"), patch(
+                "app.render.native_reel_renderer._render_motion_video",
+                side_effect=fake_render,
+            ):
+                result = export_native_reel_story(
+                    deterministic_ocean_reel_plan(),
+                    raw_dir,
+                    root,
+                    create_subtitles=True,
+                )
+
+        self.assertEqual(result.metadata["subtitled_silent_path"], "")
+        self.assertTrue(result.metadata["legacy_native_subtitle_video_disabled"])
+        self.assertFalse(result.metadata["duplicate_text_layer_detected"])
 
     def test_voiceover_duration_controls_scene_timing(self) -> None:
         reel_plan = deterministic_ocean_reel_plan()
@@ -336,7 +365,7 @@ class NativeReelStoryTests(unittest.TestCase):
         self.assertFalse(report["duration_sync_ok"])
         self.assertIn("Voiceover is longer than the final video.", report["blocking_issues"])
 
-    def test_write_voiceover_assets_creates_subtitled_mux_from_existing_audio(self) -> None:
+    def test_write_voiceover_assets_creates_kinetic_caption_mux_from_existing_audio(self) -> None:
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             self.skipTest("ffmpeg is not available")
@@ -347,20 +376,25 @@ class NativeReelStoryTests(unittest.TestCase):
             reel_dir = root / "final_reel"
             voiceover_dir.mkdir()
             reel_dir.mkdir()
+            processed_dir = reel_dir / "processed_backgrounds"
+            processed_dir.mkdir()
             audio_path = voiceover_dir / "voiceover.mp3"
             reel_path = reel_dir / "reel.mp4"
-            subtitled_silent = reel_dir / "reel_subtitled_silent.mp4"
             subprocess.run(
                 [ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:a", "libmp3lame", str(audio_path)],
                 capture_output=True,
                 check=True,
             )
-            for path in (reel_path, subtitled_silent):
-                subprocess.run(
-                    [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=1080x1920:d=4.6:r=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)],
-                    capture_output=True,
-                    check=True,
-                )
+            subprocess.run(
+                [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=1080x1920:d=4.6:r=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(reel_path)],
+                capture_output=True,
+                check=True,
+            )
+            processed_paths = []
+            for index in range(1, 6):
+                path = processed_dir / f"scene_{index:02d}.jpg"
+                Image.new("RGB", (1080, 1920), (40 + index * 20, 70, 100)).save(path)
+                processed_paths.append(str(path))
 
             scene_timings = [
                 {"scene_number": index, "start_seconds": (index - 1) * 0.9, "end_seconds": index * 0.9}
@@ -374,7 +408,7 @@ class NativeReelStoryTests(unittest.TestCase):
                 deterministic_ocean_reel_plan(),
                 {
                     "scene_timings": scene_timings,
-                    "subtitled_silent_path": str(subtitled_silent),
+                    "processed_background_paths": processed_paths,
                     "final_video_duration_seconds": 4.6,
                     "duration_sync_ok": True,
                 },
@@ -383,15 +417,18 @@ class NativeReelStoryTests(unittest.TestCase):
             voice_duration = audio_duration_seconds(audio_path)
             reel_with_voice_exists = Path(str(info["reel_with_voice_path"])).exists()
             subtitled_exists = Path(str(info["reel_with_voice_subtitled_path"])).exists()
+            kinetic_exists = Path(str(info["reel_with_voice_kinetic_subtitles_path"])).exists()
             srt_exists = Path(str(info["subtitles_srt_path"])).exists()
             ass_exists = Path(str(info["subtitles_ass_path"])).exists()
 
         self.assertTrue(reel_with_voice_exists)
         self.assertTrue(subtitled_exists)
+        self.assertTrue(kinetic_exists)
         self.assertTrue(srt_exists)
         self.assertTrue(ass_exists)
         self.assertGreaterEqual(mux_duration, voice_duration)
         self.assertTrue(info["duration_sync_ok"])
+        self.assertFalse(info["duplicate_text_layer_detected"])
 
     def test_render_only_does_not_call_llm_or_pollinations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

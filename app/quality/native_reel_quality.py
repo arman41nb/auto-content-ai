@@ -49,17 +49,38 @@ def run_native_reel_quality_gate(
     caption_sync_score = _caption_sync_score(metadata, voiceover_requested)
     kinetic_caption_score = _kinetic_caption_score(metadata, voiceover_requested)
     caption_readability_score = _caption_readability_score(metadata, voiceover_requested)
+    caption_layout_score = _caption_layout_metric(metadata, "caption_layout_score", 100 if not voiceover_requested else 0)
+    caption_collision_count = _caption_layout_metric(metadata, "caption_collision_count", 0)
+    caption_background_alignment_score = _caption_layout_metric(
+        metadata,
+        "caption_background_alignment_score",
+        100 if not voiceover_requested else 0,
+    )
+    caption_safe_zone_score = _caption_layout_metric(metadata, "caption_safe_zone_score", 100 if not voiceover_requested else 0)
+    active_highlight_layout_stability_score = _caption_layout_metric(
+        metadata,
+        "active_highlight_layout_stability_score",
+        100 if not voiceover_requested else 0,
+    )
+    duplicate_text_layer_detected = _duplicate_text_layer_detected(metadata)
     scene_cut_on_phrase_boundary_score = _scene_cut_on_phrase_boundary_score(metadata)
     edit_rhythm_score = _edit_rhythm_score(metadata)
     visual_motion_score = _visual_motion_score(metadata, motion_quality_score)
     motion_professionalism_score = visual_motion_score
     sanitizer_damage_score = _sanitizer_damage_score(metadata)
     sanitizer_damage_risk = str(metadata.get("sanitizer_visual_damage_risk", "low"))
+    sanitizer_mode = str(metadata.get("sanitizer_mode", "targeted"))
+    sanitizer_modified_area_ratio = float(
+        metadata.get("sanitizer_modified_area_ratio", metadata.get("sanitizer_area_ratio", 0.0)) or 0.0
+    )
+    image_clarity_score = _image_clarity_score(frame_paths)
     visual_polish_score = round(
         cover_quality_score * 0.22
-        + text_minimalism_score * 0.18
+        + image_clarity_score * 0.12
+        + text_minimalism_score * 0.12
         + visual_motion_score * 0.22
-        + scene_variety_score * 0.18
+        + scene_variety_score * 0.16
+        + caption_layout_score * 0.08
         + sanitizer_damage_score * 0.20
     )
     perceived_template_risk = _perceived_template_risk(ai_slideshow_risk_score, visual_motion_score, edit_rhythm_score)
@@ -71,6 +92,14 @@ def run_native_reel_quality_gate(
         + caption_sync_score * 0.14
         + kinetic_caption_score * 0.14
         - max(0, perceived_template_risk - 45) * 0.12
+    )
+    professional_edit_score = round(
+        visual_polish_score * 0.34
+        + edit_rhythm_score * 0.24
+        + motion_professionalism_score * 0.20
+        + caption_layout_score * 0.08
+        + kinetic_caption_score * 0.08
+        + caption_sync_score * 0.06
     )
 
     native_reel_score = round(
@@ -114,18 +143,32 @@ def run_native_reel_quality_gate(
         blockers.append(f"kinetic_caption_score is below 75: {kinetic_caption_score}.")
     if voiceover_requested and caption_readability_score < 75:
         blockers.append(f"caption_readability_score is below 75: {caption_readability_score}.")
+    if voiceover_requested and caption_collision_count > 0:
+        blockers.append(f"caption_collision_count is above 0: {caption_collision_count}.")
+    if voiceover_requested and duplicate_text_layer_detected:
+        blockers.append("duplicate_text_layer_detected is true.")
+    if voiceover_requested and caption_background_alignment_score < 90:
+        blockers.append(f"caption_background_alignment_score is below 90: {caption_background_alignment_score}.")
+    if voiceover_requested and caption_safe_zone_score < 90:
+        blockers.append(f"caption_safe_zone_score is below 90: {caption_safe_zone_score}.")
+    if voiceover_requested and caption_layout_score < 85:
+        blockers.append(f"caption_layout_score is below 85: {caption_layout_score}.")
     if voiceover_requested and not _captions_based_on_tts(metadata):
         blockers.append("Voiceover exists but captions are not based on TTS timing.")
     if voiceover_requested and scene_cut_on_phrase_boundary_score < 75:
         blockers.append("Scene cuts are not aligned to phrase boundaries.")
     if visual_polish_score < 75:
         blockers.append(f"visual_polish_score is below 75: {visual_polish_score}.")
+    if visual_motion_score < 75:
+        blockers.append(f"visual_motion_score is below 75: {visual_motion_score}.")
     if edit_rhythm_score < 75:
         blockers.append(f"edit_rhythm_score is below 75: {edit_rhythm_score}.")
     if perceived_template_risk > 60:
         blockers.append(f"perceived_template_risk is above 60: {perceived_template_risk}.")
     if viral_readiness_score < 75:
         blockers.append(f"viral_readiness_score is below 75: {viral_readiness_score}.")
+    if professional_edit_score < 80:
+        blockers.append(f"professional_edit_score is below 80: {professional_edit_score}.")
     if sanitizer_damage_risk == "high":
         blockers.append("Sanitizer visual damage risk is high.")
 
@@ -146,24 +189,28 @@ def run_native_reel_quality_gate(
         "caption_sync_score": caption_sync_score,
         "kinetic_caption_score": kinetic_caption_score,
         "caption_readability_score": caption_readability_score,
+        "caption_layout_score": caption_layout_score,
+        "caption_collision_count": caption_collision_count,
+        "caption_background_alignment_score": caption_background_alignment_score,
+        "caption_safe_zone_score": caption_safe_zone_score,
+        "active_highlight_layout_stability_score": active_highlight_layout_stability_score,
+        "duplicate_text_layer_detected": duplicate_text_layer_detected,
         "active_word_highlight_used": _active_word_highlight_used(metadata),
         "caption_style": _caption_style(metadata),
         "scene_cut_on_phrase_boundary_score": scene_cut_on_phrase_boundary_score,
         "visual_motion_score": visual_motion_score,
+        "sanitizer_mode": sanitizer_mode,
+        "sanitizer_modified_area_ratio": round(sanitizer_modified_area_ratio, 4),
         "sanitizer_damage_risk": sanitizer_damage_risk,
         "edit_rhythm_score": edit_rhythm_score,
         "motion_professionalism_score": motion_professionalism_score,
+        "transition_quality_score": scene_cut_on_phrase_boundary_score,
+        "image_clarity_score": image_clarity_score,
         "visual_polish_score": visual_polish_score,
         "sanitizer_damage_score": sanitizer_damage_score,
         "perceived_template_risk": perceived_template_risk,
         "viral_readiness_score": viral_readiness_score,
-        "professional_edit_score": round(
-            visual_polish_score * 0.34
-            + edit_rhythm_score * 0.24
-            + motion_professionalism_score * 0.20
-            + kinetic_caption_score * 0.12
-            + caption_sync_score * 0.10
-        ),
+        "professional_edit_score": professional_edit_score,
         "voiceover_requested": voiceover_requested,
         "voiceover_created": _voiceover_created(metadata),
         "duration_sync_ok": duration_sync_score == 100,
@@ -210,12 +257,23 @@ def write_native_reel_quality_report(output_dir: Path, report: dict[str, Any]) -
         f"- caption_sync_score: {report['caption_sync_score']}",
         f"- kinetic_caption_score: {report['kinetic_caption_score']}",
         f"- caption_readability_score: {report['caption_readability_score']}",
+        f"- caption_layout_score: {report['caption_layout_score']}",
+        f"- caption_collision_count: {report['caption_collision_count']}",
+        f"- caption_background_alignment_score: {report['caption_background_alignment_score']}",
+        f"- caption_safe_zone_score: {report['caption_safe_zone_score']}",
+        f"- active_highlight_layout_stability_score: {report['active_highlight_layout_stability_score']}",
+        f"- duplicate_text_layer_detected: {str(report['duplicate_text_layer_detected']).lower()}",
         f"- active_word_highlight_used: {str(report['active_word_highlight_used']).lower()}",
         f"- caption_style: {report['caption_style']}",
         f"- scene_cut_on_phrase_boundary_score: {report['scene_cut_on_phrase_boundary_score']}",
         f"- visual_motion_score: {report['visual_motion_score']}",
+        f"- sanitizer_mode: {report['sanitizer_mode']}",
+        f"- sanitizer_modified_area_ratio: {report['sanitizer_modified_area_ratio']}",
         f"- sanitizer_damage_risk: {report['sanitizer_damage_risk']}",
         f"- edit_rhythm_score: {report['edit_rhythm_score']}",
+        f"- professional_edit_score: {report['professional_edit_score']}",
+        f"- transition_quality_score: {report['transition_quality_score']}",
+        f"- image_clarity_score: {report['image_clarity_score']}",
         f"- visual_polish_score: {report['visual_polish_score']}",
         f"- viral_readiness_score: {report['viral_readiness_score']}",
         f"- reel_path: {report['reel_path']}",
@@ -409,6 +467,29 @@ def _caption_readability_score(metadata: dict[str, Any], requested: bool) -> int
     return 0
 
 
+def _caption_layout_metric(metadata: dict[str, Any], key: str, default: int) -> int:
+    voiceover = metadata.get("voiceover", {})
+    native = metadata.get("native_reel_render", {})
+    for payload in (voiceover, native):
+        if isinstance(payload, dict) and key in payload:
+            return int(payload.get(key, default) or 0)
+    return default
+
+
+def _duplicate_text_layer_detected(metadata: dict[str, Any]) -> bool:
+    voiceover = metadata.get("voiceover", {})
+    native = metadata.get("native_reel_render", {})
+    for payload in (voiceover, native):
+        if isinstance(payload, dict) and "duplicate_text_layer_detected" in payload:
+            return bool(payload.get("duplicate_text_layer_detected"))
+    return bool(
+        isinstance(native, dict)
+        and native.get("subtitled_silent_path")
+        and isinstance(voiceover, dict)
+        and voiceover.get("kinetic_subtitles_created")
+    )
+
+
 def _active_word_highlight_used(metadata: dict[str, Any]) -> bool:
     voiceover = metadata.get("voiceover", {})
     native = metadata.get("native_reel_render", {})
@@ -550,6 +631,23 @@ def _fast_artifact_risk(path: Path) -> float:
     if bottom_edge > 54:
         risk += 30
     return min(100.0, risk)
+
+
+def _image_clarity_score(paths: list[Path]) -> int:
+    scores: list[int] = []
+    for path in paths:
+        try:
+            with Image.open(path) as image:
+                lum = image.convert("L")
+                small = lum.resize((180, 320), Image.Resampling.BILINEAR)
+                contrast = ImageStat.Stat(small).stddev[0]
+                edge_mean = ImageStat.Stat(small.filter(ImageFilter.FIND_EDGES)).mean[0]
+        except Exception:
+            scores.append(35)
+            continue
+        score = 58 + min(24, int(contrast * 0.5)) + min(18, int(edge_mean * 0.7))
+        scores.append(max(0, min(100, score)))
+    return round(sum(scores) / len(scores)) if scores else 0
 
 
 def _voiceover_created(metadata: dict[str, Any]) -> bool:

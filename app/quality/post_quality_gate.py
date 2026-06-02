@@ -132,7 +132,14 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         caption_sync_score = int(native_reel_quality.get("caption_sync_score", 100) or 0)
         kinetic_caption_score = int(native_reel_quality.get("kinetic_caption_score", 100) or 0)
         caption_readability_score = int(native_reel_quality.get("caption_readability_score", 100) or 0)
+        caption_layout_score = int(native_reel_quality.get("caption_layout_score", 100) or 0)
+        caption_collision_count = int(native_reel_quality.get("caption_collision_count", 0) or 0)
+        caption_background_alignment_score = int(native_reel_quality.get("caption_background_alignment_score", 100) or 0)
+        caption_safe_zone_score = int(native_reel_quality.get("caption_safe_zone_score", 100) or 0)
+        duplicate_text_layer_detected = bool(native_reel_quality.get("duplicate_text_layer_detected", False))
         scene_cut_on_phrase_boundary_score = int(native_reel_quality.get("scene_cut_on_phrase_boundary_score", 100) or 0)
+        visual_motion_score = int(native_reel_quality.get("visual_motion_score", 100) or 0)
+        professional_edit_score = int(native_reel_quality.get("professional_edit_score", 100) or 0)
         sanitizer_damage_risk = str(native_reel_quality.get("sanitizer_damage_risk", metadata.get("sanitizer_visual_damage_risk", "low")))
         perceived_template_risk = int(native_reel_quality.get("perceived_template_risk", ai_slideshow_risk_score) or 0)
         viral_readiness_score = int(native_reel_quality.get("viral_readiness_score", native_reel_score) or 0)
@@ -163,8 +170,29 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         if caption_readability_score < 75:
             blocking.append(f"Native Reel caption readability score is below publish threshold: {caption_readability_score}.")
             score -= 8
+        if caption_collision_count > 0:
+            blocking.append(f"Native Reel caption collision count is above 0: {caption_collision_count}.")
+            score -= 16
+        if duplicate_text_layer_detected:
+            blocking.append("Native Reel duplicate text layer was detected.")
+            score -= 16
+        if caption_background_alignment_score < 90:
+            blocking.append(f"Native Reel caption background alignment score is below threshold: {caption_background_alignment_score}.")
+            score -= 12
+        if caption_safe_zone_score < 90:
+            blocking.append(f"Native Reel caption safe-zone score is below threshold: {caption_safe_zone_score}.")
+            score -= 12
+        if caption_layout_score < 85:
+            blocking.append(f"Native Reel caption layout score is below threshold: {caption_layout_score}.")
+            score -= 12
         if scene_cut_on_phrase_boundary_score < 75:
             blocking.append("Native Reel scene cuts are not aligned to phrase boundaries.")
+            score -= 8
+        if visual_motion_score < 75:
+            blocking.append(f"Native Reel visual motion score is below threshold: {visual_motion_score}.")
+            score -= 8
+        if professional_edit_score < 80:
+            blocking.append(f"Native Reel professional edit score is below threshold: {professional_edit_score}.")
             score -= 8
         if sanitizer_damage_risk == "high":
             blocking.append("Native Reel sanitizer damage risk is high.")
@@ -244,6 +272,24 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
             "caption_readability_score": native_reel_quality.get("caption_readability_score", 0)
             if isinstance(native_reel_quality, dict)
             else 0,
+            "caption_layout_score": native_reel_quality.get("caption_layout_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "caption_collision_count": native_reel_quality.get("caption_collision_count", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "caption_background_alignment_score": native_reel_quality.get("caption_background_alignment_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "caption_safe_zone_score": native_reel_quality.get("caption_safe_zone_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "active_highlight_layout_stability_score": native_reel_quality.get("active_highlight_layout_stability_score", 0)
+            if isinstance(native_reel_quality, dict)
+            else 0,
+            "duplicate_text_layer_detected": native_reel_quality.get("duplicate_text_layer_detected", False)
+            if isinstance(native_reel_quality, dict)
+            else False,
             "active_word_highlight_used": native_reel_quality.get("active_word_highlight_used", False)
             if isinstance(native_reel_quality, dict)
             else False,
@@ -286,6 +332,11 @@ def write_post_quality_report(output_dir: Path, report: PostQualityReport) -> No
         f"- caption_sync_score: {report.details.get('caption_sync_score', 0)}",
         f"- kinetic_caption_score: {report.details.get('kinetic_caption_score', 0)}",
         f"- caption_readability_score: {report.details.get('caption_readability_score', 0)}",
+        f"- caption_layout_score: {report.details.get('caption_layout_score', 0)}",
+        f"- caption_collision_count: {report.details.get('caption_collision_count', 0)}",
+        f"- caption_background_alignment_score: {report.details.get('caption_background_alignment_score', 0)}",
+        f"- caption_safe_zone_score: {report.details.get('caption_safe_zone_score', 0)}",
+        f"- duplicate_text_layer_detected: {str(report.details.get('duplicate_text_layer_detected', False)).lower()}",
         f"- active_word_highlight_used: {str(report.details.get('active_word_highlight_used', False)).lower()}",
         f"- caption_style: {report.details.get('caption_style', '')}",
         f"- voiceover_requested: {str(report.details.get('voiceover_requested', False)).lower()}",

@@ -146,7 +146,7 @@ class ArtifactSanitizerRenderTests(unittest.TestCase):
         self.assertFalse(report["sanitizer_heavy_default"])
 
     def test_large_area_sanitizer_ratio_is_high_damage(self) -> None:
-        self.assertEqual(sanitizer_visual_damage_risk(0.21), "high")
+        self.assertEqual(sanitizer_visual_damage_risk(0.26), "high")
 
 
 if __name__ == "__main__":

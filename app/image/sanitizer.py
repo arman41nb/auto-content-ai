@@ -36,7 +36,7 @@ def sanitize_post_images(
 ) -> dict[str, object]:
     """Create sanitized copies for raw slides with likely lower-band AI text artifacts."""
 
-    sanitizer_mode = mode if mode in {"off", "light", "targeted", "heavy"} else "targeted"
+    sanitizer_mode = mode if mode in {"off", "light", "targeted", "strict", "heavy"} else "targeted"
     sanitized_dir.mkdir(parents=True, exist_ok=True)
     slides: list[SanitizedSlide] = []
     for slide in plan.slides:
@@ -63,7 +63,7 @@ def sanitize_post_images(
         sanitized = False
         area_ratio = 0.0
         false_positive = _false_positive_suspected(suspicion_score, features)
-        threshold = 55.0 if sanitizer_mode == "light" else 40.0
+        threshold = 55.0 if sanitizer_mode == "light" else 28.0 if sanitizer_mode in {"strict", "heavy"} else 40.0
         if sanitizer_mode == "off":
             image.save(output_path, "JPEG", quality=94, optimize=True)
             actions = ["sanitizer_mode_off_raw_copy"]
@@ -73,8 +73,10 @@ def sanitize_post_images(
             sanitized = True
             area_ratio = targeted_sanitizer_area_ratio(image)
             actions = ["targeted_lower_watermark_soft_blur", "local_soft_gradient"]
-            if area_ratio > 0.20:
-                actions.append("warning_modified_more_than_20_percent")
+            if area_ratio > 0.25:
+                actions.append("warning_modified_more_than_25_percent")
+            elif area_ratio > 0.15:
+                actions.append("warning_modified_more_than_15_percent")
         else:
             image.save(output_path, "JPEG", quality=94, optimize=True)
             actions = ["raw_copy_no_sanitization_needed"]
@@ -110,7 +112,9 @@ def sanitize_post_images(
         "sanitized_slides": sanitized_slides,
         "sanitized_available_slides": available_slides,
         "sanitizer_area_ratio": round(max_area_ratio, 4),
+        "sanitizer_modified_area_ratio": round(max_area_ratio, 4),
         "sanitizer_area_ratio_per_slide": area_by_slide,
+        "sanitizer_modified_area_ratio_per_slide": area_by_slide,
         "sanitizer_visual_damage_risk": damage_risk,
         "sanitizer_mode": sanitizer_mode,
         "sanitizer_heavy_default": False,
@@ -188,9 +192,9 @@ def targeted_sanitizer_area_ratio(image: Image.Image) -> float:
 
 
 def sanitizer_visual_damage_risk(area_ratio: float) -> str:
-    if area_ratio > 0.20:
+    if area_ratio > 0.25:
         return "high"
-    if area_ratio > 0.12:
+    if area_ratio > 0.15:
         return "medium"
     return "low"
 

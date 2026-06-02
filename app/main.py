@@ -108,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create final_reel/cover.jpg and final_reel/reel.mp4 from generated images when FFmpeg is available.",
     )
     add_voiceover_arguments(generate)
+    add_sanitizer_argument(generate)
     generate.add_argument(
         "--plan-file",
         default=None,
@@ -227,6 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create final_reel/cover.jpg and final_reel/reel.mp4 from generated images when FFmpeg is available.",
     )
     add_voiceover_arguments(auto)
+    add_sanitizer_argument(auto)
 
     batch = subparsers.add_parser("batch-reels", help="Generate or rescore a native Reel candidate batch.")
     batch.add_argument("--niche", default=None, help="Content niche: science, future, or history.")
@@ -248,6 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     batch.add_argument("--template", default="native_reel_story", help="Must be native_reel_story for Reel batches.")
     add_voiceover_arguments(batch)
+    add_sanitizer_argument(batch)
     batch.add_argument("--batch-dir", default=None, help="Existing batch folder for --score-only, or output batch folder.")
     batch.add_argument("--score-only", action="store_true", help="Recompute comparison reports without LLM or images.")
 
@@ -272,6 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     weekly.add_argument("--template", default="native_reel_story", help="Must be native_reel_story for weekly queues.")
     add_voiceover_arguments(weekly)
+    add_sanitizer_argument(weekly)
     weekly.add_argument("--dry-run", action="store_true", help="Discover and assign topics without LLM, images, or video.")
     weekly.add_argument("--score-only", action="store_true", help="Recompute queue reports from existing candidate outputs.")
     weekly.add_argument("--queue-dir", default=None, help="Existing queue folder for --score-only, or output queue folder.")
@@ -314,6 +318,15 @@ def add_voiceover_arguments(parser: argparse.ArgumentParser) -> None:
         "--voice-rate",
         default="-5%",
         help="edge-tts speaking rate, e.g. -5%% or +0%%.",
+    )
+
+
+def add_sanitizer_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--sanitizer-mode",
+        choices=["off", "light", "targeted", "strict"],
+        default="targeted",
+        help="Image cleanup strength for likely AI text artifacts.",
     )
 
 
@@ -473,7 +486,12 @@ def generate(args: argparse.Namespace) -> int:
                 print(f"  {missing}", file=sys.stderr)
             return 1
         print("Sanitizing selected raw images before render...")
-        sanitizer_report = sanitize_post_images(plan, raw_dir=raw_dir, sanitized_dir=sanitized_dir)
+        sanitizer_report = sanitize_post_images(
+            plan,
+            raw_dir=raw_dir,
+            sanitized_dir=sanitized_dir,
+            mode=str(getattr(args, "sanitizer_mode", "targeted") or "targeted"),
+        )
         print("Rendering final carousel slides from existing raw images...")
         renderer = CarouselRenderer(handle=args.handle, template_name=args.template)
         render_template_used_per_slide = renderer.render_plan(
@@ -626,7 +644,12 @@ def generate(args: argparse.Namespace) -> int:
 
         if not args.skip_render:
             print("Sanitizing selected raw images before render...")
-            sanitizer_report = sanitize_post_images(plan, raw_dir=raw_dir, sanitized_dir=sanitized_dir)
+            sanitizer_report = sanitize_post_images(
+                plan,
+                raw_dir=raw_dir,
+                sanitized_dir=sanitized_dir,
+                mode=str(getattr(args, "sanitizer_mode", "targeted") or "targeted"),
+            )
             print("Rendering final carousel slides...")
             renderer = CarouselRenderer(handle=args.handle, template_name=args.template)
             render_template_used_per_slide = renderer.render_plan(
@@ -713,7 +736,12 @@ def generate(args: argparse.Namespace) -> int:
         metadata["native_reel_render"] = native_reel_render_metadata
     metadata = preserve_existing_context(existing_metadata, metadata)
     sanitizer_report = (
-        sanitize_post_images(plan, raw_dir=raw_dir, sanitized_dir=sanitized_dir)
+        sanitize_post_images(
+            plan,
+            raw_dir=raw_dir,
+            sanitized_dir=sanitized_dir,
+            mode=str(getattr(args, "sanitizer_mode", "targeted") or "targeted"),
+        )
         if not args.skip_images and args.skip_render
         else locals().get("sanitizer_report", {"sanitized_images_used": False})
     )
@@ -949,6 +977,22 @@ def write_voiceover_assets(
             info["kinetic_subtitles_created"] = bool(kinetic_result.get("created", False))
             render_metadata["kinetic_subtitle_silent_path"] = kinetic_result.get("path", "")
             render_metadata["kinetic_subtitles_created"] = bool(kinetic_result.get("created", False))
+            for key in (
+                "caption_layout_score",
+                "caption_collision_count",
+                "caption_background_alignment_score",
+                "caption_safe_zone_score",
+                "active_highlight_layout_stability_score",
+                "duplicate_text_layer_detected",
+                "caption_layout_hidden_collision_count",
+                "caption_layout_warning_count",
+                "caption_layout_sample_count",
+                "caption_visible_sample_count",
+                "caption_style",
+            ):
+                if key in kinetic_result:
+                    info[key] = kinetic_result[key]
+                    render_metadata[key] = kinetic_result[key]
             if kinetic_result.get("created"):
                 kinetic_path = output_dir / "final_reel" / "reel_with_voice_kinetic_subtitles.mp4"
                 if _mux_voiceover(ffmpeg, kinetic_silent_path, mp3_path, kinetic_path):
@@ -972,22 +1016,6 @@ def write_voiceover_assets(
                     if _mux_voiceover(ffmpeg, kinetic_silent_path, mp3_path, subtitled_path):
                         info["reel_with_voice_subtitled_path"] = str(subtitled_path)
                         info["subtitled_video_path"] = str(subtitled_path)
-
-        subtitled_silent = Path(str(render_metadata.get("subtitled_silent_path", "")))
-        if subtitled_silent.exists() and not info.get("reel_with_voice_subtitled_path"):
-            subtitled_path = output_dir / "final_reel" / "reel_with_voice_subtitled.mp4"
-            subtitle_video_source = _video_source_synced_for_audio(
-                ffmpeg=ffmpeg,
-                source_path=subtitled_silent,
-                output_dir=output_dir,
-                audio_seconds=float(info["voiceover_duration_seconds"] or 0.0),
-                suffix="_subtitled_extended",
-            )
-            if _mux_voiceover(ffmpeg, subtitle_video_source, mp3_path, subtitled_path):
-                info["reel_with_voice_subtitled_path"] = str(subtitled_path)
-                info["subtitled_video_path"] = str(subtitled_path)
-                info["subtitles_burned_in"] = True
-                info["subtitle_sync_ok"] = bool(info.get("subtitles_created")) and bool(info.get("duration_sync_ok"))
     return info
 
 

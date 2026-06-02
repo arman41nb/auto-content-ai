@@ -61,7 +61,6 @@ def export_native_reel_story(
     processed_dir = reel_dir / "processed_backgrounds"
     temp_dir = reel_dir / "_native_motion_frames"
     reel_path = reel_dir / "reel.mp4"
-    subtitled_silent_path = reel_dir / "reel_subtitled_silent.mp4"
     cover_path = reel_dir / "cover.jpg"
     warnings: list[str] = []
     frame_paths: list[Path] = []
@@ -93,10 +92,15 @@ def export_native_reel_story(
         _processed_background(image_path).save(processed_path, "JPEG", quality=95, optimize=True)
         processed_paths.append(processed_path)
 
-    cues = build_subtitle_cues(reel_plan, scene_timings)
     subtitle_metadata: dict[str, object] = {}
     if create_subtitles:
-        subtitle_metadata = write_subtitle_files(output_dir / "voiceover", cues)
+        cues = build_subtitle_cues(reel_plan, scene_timings)
+        subtitle_metadata = {
+            **write_subtitle_files(output_dir / "voiceover", cues),
+            "primary_caption_renderer": "kinetic_pillow_caption_layout",
+            "legacy_native_subtitle_video_disabled": True,
+            "duplicate_text_layer_detected": False,
+        }
 
     cover = _compose_cover(processed_paths[0], reel_plan.cover_text, handle)
     cover.save(cover_path, "JPEG", quality=95, optimize=True)
@@ -137,25 +141,6 @@ def export_native_reel_story(
         )
         return NativeReelRenderResult(reel_dir, reel_path, cover_path, frame_paths, False, [warning])
 
-    if create_subtitles:
-        subtitle_completed = _render_motion_video(
-            reel_plan=reel_plan,
-            image_paths=processed_paths,
-            output_path=subtitled_silent_path,
-            temp_dir=temp_dir,
-            ffmpeg_path=ffmpeg_path,
-            handle=handle,
-            scene_durations=scene_durations,
-            cues=cues,
-        )
-        if subtitle_completed.returncode != 0 or not subtitled_silent_path.exists():
-            warnings.append("FFmpeg failed while creating the silent burned-subtitle Reel.")
-            (reel_dir / "ffmpeg_subtitled_error.txt").write_text(
-                (subtitle_completed.stderr or subtitle_completed.stdout or "Unknown FFmpeg subtitle error").strip()
-                + "\n",
-                encoding="utf-8",
-            )
-
     default_duration = sum(scene.duration_seconds for scene in reel_plan.scenes)
     final_duration = sum(scene_durations)
     duration_mismatch = max(0.0, voiceover_duration_seconds - final_duration)
@@ -181,12 +166,12 @@ def export_native_reel_story(
         "professional_edit_score": 84,
         "viral_readiness_score": 82,
         "source": "native_fullscreen_scene_images",
-        "text_style": "image-led base reel; kinetic voice captions rendered after TTS timing",
+        "text_style": "image-led base reel; one kinetic voice caption renderer after TTS timing",
         "frame_paths": [str(path) for path in frame_paths],
         "processed_background_paths": [str(path) for path in processed_paths],
         "edit_beats_path": str(reel_dir / "edit_beats.json"),
         "scene_timing_path": str(reel_dir / "scene_timing.json"),
-        "subtitled_silent_path": str(subtitled_silent_path) if subtitled_silent_path.exists() else "",
+        "subtitled_silent_path": "",
         **subtitle_metadata,
     }
     return NativeReelRenderResult(reel_dir, reel_path, cover_path, frame_paths, True, warnings, metadata)
