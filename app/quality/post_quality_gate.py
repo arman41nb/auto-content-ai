@@ -54,7 +54,8 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
     if len(existing_final) != len(plan.slides):
         blocking.append(f"Expected {len(plan.slides)} final slide(s), found {len(existing_final)}.")
 
-    dimension_warnings = _dimension_warnings(existing_final)
+    expected_slide_size = _expected_final_slide_size(metadata)
+    dimension_warnings = _dimension_warnings(existing_final, expected_slide_size)
     if dimension_warnings:
         blocking.extend(dimension_warnings)
         score -= min(30, 8 * len(dimension_warnings))
@@ -206,29 +207,7 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         for issue in _string_list(native_reel_quality.get("blocking_issues", [])):
             blocking.append(issue)
 
-    mascot_story_quality = metadata.get("mascot_story_quality", {})
-    if isinstance(mascot_story_quality, dict) and mascot_story_quality:
-        if not bool(mascot_story_quality.get("quality_gate_passed", False)):
-            blocking.append("Mascot story production visual quality gate failed.")
-            score -= 18
-        if bool(mascot_story_quality.get("human_review_required", False)) and str(metadata.get("human_review_status", "")).lower() != "approved":
-            blocking.append("Mascot story requires human review before posting.")
-            score -= 8
-        if mascot_story_quality.get("primitive_mascot_risk") == "high":
-            blocking.append("Mascot story primitive mascot risk is high.")
-            score -= 18
-        if mascot_story_quality.get("placeholder_visual_risk") == "high":
-            blocking.append("Mascot story placeholder visual risk is high.")
-            score -= 16
-        if mascot_story_quality.get("powerpoint_chart_risk") == "high":
-            blocking.append("Mascot story PowerPoint-like chart risk is high.")
-            score -= 12
-        visual_asset_quality = int(mascot_story_quality.get("visual_asset_quality_score", 100) or 0)
-        if visual_asset_quality < 75:
-            blocking.append(f"Mascot story visual asset quality is below threshold: {visual_asset_quality}.")
-            score -= 14
-
-    design = _design_quality_report(output_dir, existing_final, metadata)
+    design = _design_quality_report(output_dir, existing_final, metadata, expected_slide_size)
     warnings.extend(design["amateur_template_warnings"])
     if design["design_score"] < 70:
         blocking.append(f"Design score is below publish threshold: {design['design_score']}.")
@@ -258,19 +237,6 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
             "intentional_overlay_text_present": bool(metadata.get("intentional_overlay_text_present", False)),
             "publish_blocking_image_warnings": publish_blocking_image_warnings,
             "native_reel_quality": native_reel_quality if isinstance(native_reel_quality, dict) else {},
-            "mascot_story_quality": mascot_story_quality if isinstance(mascot_story_quality, dict) else {},
-            "mascot_story_visual_asset_quality_score": mascot_story_quality.get("visual_asset_quality_score", 0)
-            if isinstance(mascot_story_quality, dict)
-            else 0,
-            "mascot_story_primitive_mascot_risk": mascot_story_quality.get("primitive_mascot_risk", "")
-            if isinstance(mascot_story_quality, dict)
-            else "",
-            "mascot_story_placeholder_visual_risk": mascot_story_quality.get("placeholder_visual_risk", "")
-            if isinstance(mascot_story_quality, dict)
-            else "",
-            "mascot_story_powerpoint_chart_risk": mascot_story_quality.get("powerpoint_chart_risk", "")
-            if isinstance(mascot_story_quality, dict)
-            else "",
             "native_reel_score": native_reel_quality.get("native_reel_score", 0)
             if isinstance(native_reel_quality, dict)
             else 0,
@@ -410,7 +376,12 @@ def write_post_quality_report(output_dir: Path, report: PostQualityReport) -> No
     (output_dir / "post_quality_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _design_quality_report(output_dir: Path, final_paths: list[Path], metadata: dict[str, Any]) -> dict[str, Any]:
+def _design_quality_report(
+    output_dir: Path,
+    final_paths: list[Path],
+    metadata: dict[str, Any],
+    expected_slide_size: tuple[int, int],
+) -> dict[str, Any]:
     black_ratios: list[float] = []
     lower_black_ratios: list[float] = []
     for path in final_paths:
@@ -420,7 +391,7 @@ def _design_quality_report(output_dir: Path, final_paths: list[Path], metadata: 
 
     avg_black = _average(black_ratios)
     avg_lower_black = _average(lower_black_ratios)
-    text_box_ratio = _max_text_box_area_ratio(metadata)
+    text_box_ratio = _max_text_box_area_ratio(metadata, expected_slide_size)
     visual_variety_score, repeated_similarity = _visual_variety(final_paths)
     reel_export = metadata.get("reel_export", {})
     reel_requested = isinstance(reel_export, dict) and bool(reel_export.get("requested"))
@@ -657,12 +628,12 @@ def _pixel_ratio_below(image: Image.Image, threshold: int) -> float:
     return dark_pixels / total
 
 
-def _max_text_box_area_ratio(metadata: dict[str, Any]) -> float:
+def _max_text_box_area_ratio(metadata: dict[str, Any], expected_slide_size: tuple[int, int] = CANVAS_SIZE) -> float:
     regions = metadata.get("rendered_overlay_ignored_regions", {})
     if not isinstance(regions, dict):
         return 0.0
     max_ratio = 0.0
-    total_area = CANVAS_SIZE[0] * CANVAS_SIZE[1]
+    total_area = expected_slide_size[0] * expected_slide_size[1]
     for slide_regions in regions.values():
         if not isinstance(slide_regions, list):
             continue
@@ -719,13 +690,28 @@ def _average(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def _dimension_warnings(paths: list[Path]) -> list[str]:
+def _expected_final_slide_size(metadata: dict[str, Any]) -> tuple[int, int]:
+    template = str(metadata.get("visual_template", "") or "")
+    selected_pattern = str(metadata.get("selected_pattern", "") or "")
+    reel_export = metadata.get("reel_export", {})
+    reel_template = str(reel_export.get("template", "") if isinstance(reel_export, dict) else "")
+    if any(
+        value in {"editorial_explainer_reel", "explainer_host_reel"}
+        for value in (template, selected_pattern, reel_template)
+    ):
+        return (1080, 1920)
+    return CANVAS_SIZE
+
+
+def _dimension_warnings(paths: list[Path], expected_size: tuple[int, int] = CANVAS_SIZE) -> list[str]:
     warnings: list[str] = []
     for path in paths:
         try:
             with Image.open(path) as image:
-                if image.size != CANVAS_SIZE:
-                    warnings.append(f"{path.name} has dimensions {image.width}x{image.height}, expected 1080x1350.")
+                if image.size != expected_size:
+                    warnings.append(
+                        f"{path.name} has dimensions {image.width}x{image.height}, expected {expected_size[0]}x{expected_size[1]}."
+                    )
         except Exception as exc:
             warnings.append(f"{path.name} could not be inspected: {exc}.")
     return warnings

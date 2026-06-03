@@ -9,14 +9,13 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageEnhance
 
-from app.mascot.mascot_profile import MascotProfile
 from app.media.media_item import MediaItem
 from app.render.fonts import load_font
 from app.render.motion_infographics import create_motion_infographic_still
 from app.render.native_reel_renderer import REEL_SIZE
 
 
-EXTERNAL_PROVIDERS = {"pexels", "unsplash", "wikimedia"}
+EXTERNAL_PROVIDERS = {"pexels"}
 PRODUCTION_VISUAL_MINIMUMS = True
 AI_GENERATED_PROVIDER = "ai_generated"
 PREMIUM_INFOGRAPHIC_PROVIDER = "premium_infographic"
@@ -26,8 +25,6 @@ def missing_media_api_keys() -> list[str]:
     missing: list[str] = []
     if not os.getenv("PEXELS_API_KEY"):
         missing.append("PEXELS_API_KEY")
-    if not os.getenv("UNSPLASH_ACCESS_KEY"):
-        missing.append("UNSPLASH_ACCESS_KEY")
     return missing
 
 
@@ -60,7 +57,6 @@ def visual_quality_warnings(item: MediaItem, relevance_threshold: int = 80) -> l
 def create_scene_fallback(
     scene: Any,
     output_path: Path,
-    mascot: MascotProfile | None = None,
     production_visual_minimums: bool = PRODUCTION_VISUAL_MINIMUMS,
 ) -> MediaItem:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +88,7 @@ def create_scene_fallback(
             height=REEL_SIZE[1],
             license="AI-generated image",
             attribution="Generated with configured AI image provider",
-            relevance_score=90 if visual_type in {"mascot_ai", "mixed"} else 86,
+            relevance_score=86,
             vertical_usability_score=100,
             license_safety_score=84,
             visual_clarity_score=84,

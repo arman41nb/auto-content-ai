@@ -19,7 +19,7 @@ def rank_media_items(items: list[MediaItem], query: str) -> list[MediaItem]:
         clarity = 88 if item.width >= 1080 and item.height >= 1280 else 82 if item.height >= 1080 else 58
         if item.media_type == "stock_video":
             clarity = min(95, clarity + 4)
-        trust = 90 if item.provider in {"pexels", "unsplash", "wikimedia"} else 72
+        trust = 90 if item.provider == "pexels" else 72
         ranked.append(
             item.model_copy(
                 update={

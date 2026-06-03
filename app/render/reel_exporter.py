@@ -49,7 +49,7 @@ def export_reel_package(
     key_frames_dir.mkdir(parents=True, exist_ok=True)
 
     image_source_dir = preferred_image_dir(output_dir, raw_dir)
-    image_paths = _collect_image_paths(image_source_dir) or _collect_image_paths(raw_dir) or _collect_image_paths(final_dir)
+    image_paths = _collect_image_paths(final_dir) or _collect_image_paths(image_source_dir) or _collect_image_paths(raw_dir)
     if not image_paths:
         warning = "Reel package skipped because no slide images or raw images were available."
         (reel_dir / "README_TODO.txt").write_text(warning + "\n", encoding="utf-8")

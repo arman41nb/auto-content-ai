@@ -2,7 +2,7 @@
 
 Local-first AI content engine for Unreal Science & What-If Instagram/Reel content.
 
-Auto Carousel AI is an experimental Growth MVP that discovers science and what-if topics, scores them for short-form growth potential, plans carousel posts with optional LLM fallback, generates images with Pollinations, renders portrait carousel slides, and can export a Reel package with local FFmpeg.
+Auto Carousel AI is an experimental Growth MVP that discovers topics, scores them for short-form growth potential, plans carousel posts with optional LLM fallback, sources real-world media first, renders portrait slides, and can export a Reel package with local FFmpeg.
 
 Manual review is required before posting. The project does not auto-publish to Instagram.
 
@@ -11,11 +11,10 @@ Manual review is required before posting. The project does not auto-publish to I
 - Topic discovery from static packs and optional external sources.
 - Lane scoring for `what_if_disaster`, `extreme_science`, `future_scenario`, and `any`.
 - LLM fallback across configured providers.
-- Pollinations image generation with multiple image variants.
+- Pexels-first media sourcing for editorial explainers, with AI image generation reserved for unsupported scenes.
 - Carousel rendering with Pillow.
 - Native `native_reel_story` output for 1080x1920, five-scene cinematic Reels.
-- Hosted `explainer_host_reel` output with a fictional host, media planning, stock/Wikimedia/chart support, and explainer quality reports.
-- `hybrid_story_explainer` output for eight-scene story-led Reels with real-world context, small Miko guidance, proxy/questioner scenes, premium infographics, and hybrid quality reports.
+- `editorial_explainer_reel` output for clean, hostless, real-world grounded 1080x1920 explainers with Pexels-first media planning, premium infographics, and editorial QA reports. The old `explainer_host_reel` name remains only as a compatibility alias and does not create a host.
 - Reel export with FFmpeg or the bundled `imageio-ffmpeg` fallback.
 - Optional `edge-tts` voiceover generation and audio muxing.
 - Quality gate reports for generated post packages.
@@ -41,7 +40,6 @@ Required environment keys are all optional at runtime:
 - `OPENROUTER_API_KEY` optional
 - `CEREBRAS_API_KEY` optional
 - `PEXELS_API_KEY` optional for explainer stock media
-- `UNSPLASH_ACCESS_KEY` optional for explainer stock media
 
 The app skips missing LLM and media providers gracefully. Discovery can also use `NASA_API_KEY`; if it is empty, the NASA source falls back to public demo access where supported.
 Use `python -m app.main media-health` to check media-provider configuration without printing secret values.
@@ -79,21 +77,15 @@ python -m app.main auto --niche science --lane any --count 1 --sources static --
 
 Native Reel outputs include `final_reel/reel.mp4`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/reel_with_voice_subtitled.mp4`, `final_reel/cover.jpg`, `final_reel/edit_beats.json`, `final_reel/scene_timing.json`, `final_reel/frames/frame_01.jpg` through `frame_05.jpg`, `reel_plan.json`, and voiceover timing assets when requested.
 
-Generate one hosted explainer Reel:
+Generate one editorial explainer Reel:
 
 ```bash
-python -m app.main generate --topic "What is the relationship between oil prices and the dollar?" --niche economy --slides 5 --handle "@yourpage" --image-variants 2 --rate-limit 20 --llm-provider auto --make-reel --template explainer_host_reel --voiceover
+python -m app.main generate --topic "What is the relationship between oil prices and the dollar?" --niche economy --slides 5 --handle "@yourpage" --image-variants 2 --rate-limit 20 --llm-provider auto --make-reel --template editorial_explainer_reel --voiceover
 ```
 
-Explainer outputs include `explainer_plan.json`, `media_plan.json`, `media_selection_report.json`, `media_attribution.json`, `explainer_quality_report.md/json`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/cover.jpg`, and QA reports under `outputs/qa`. The fictional default host is Nova (`data/hosts/nova.json`). Host reference assets are generated under `host_assets/` and are ignored by git.
+Explainer outputs include `explainer_plan.json`, `media_plan.json`, `media_decision_report.json`, `media_selection_report.json`, `media_attribution.json`, `explainer_quality_report.md/json`, `final_slides/slide_01.jpg` through `slide_05.jpg`, `final_reel/frames/frame_01.jpg` through `frame_05.jpg`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/cover.jpg`, and QA reports under `outputs/qa`.
 
-Generate one hybrid story explainer Reel:
-
-```bash
-python -m app.main generate --topic "What is the relationship between oil prices and the dollar?" --niche economy --slides 8 --handle "@yourpage" --image-variants 3 --rate-limit 25 --llm-provider auto --make-reel --template hybrid_story_explainer --voiceover --mascot miko --media-sources mixed --prefer-video-media --no-human-host --production-visual-minimums --allow-questioner --max-mascot-frame-share 0.35 --require-real-world-context-scenes 3 --caption-style hybrid_editorial
-```
-
-Hybrid story outputs include `hybrid_story_plan.json`, `media_candidates.json`, `media_decision_report.json`, `media_selection_report.json`, `media_attribution.json`, `hybrid_story_quality_report.md/json`, `final_reel/reel_with_voice_kinetic_subtitles.mp4`, `final_reel/cover.jpg`, and `outputs/qa/hybrid_story_v1_*_report.md/json`.
+Character-led templates are disabled. `mascot_story_explainer` and `hybrid_story_explainer` now fail fast and have no planning, media, or render implementation in the codebase.
 
 Re-render an existing package without calling an LLM or image provider:
 
@@ -112,7 +104,6 @@ python -m app.main generate --output-dir "outputs/posts/..." --resume --image-va
 ```text
 app/                  CLI, planning, discovery, rendering, quality, and provider code
 data/research/        Local research packs
-data/hosts/           Fictional host profiles
 data/patterns/        Carousel pattern library
 tests/                Unit tests
 outputs/posts/        Generated post packages, ignored by git
@@ -148,8 +139,6 @@ Current limitations:
 - No Instagram auto-publishing.
 - No scheduling, dashboard, database, or deployment configuration.
 - LLM providers and Pollinations require internet access at runtime.
-- Explainer host identity consistency uses repeated prompts and reference assets; it is not guaranteed perfect face locking.
-- Hybrid mascot consistency uses reference assets and small contextual prompts; human review is still required.
 - Generated image quality can vary and should be reviewed.
 - Lightweight quality gates are helpful but not a substitute for editorial review.
 

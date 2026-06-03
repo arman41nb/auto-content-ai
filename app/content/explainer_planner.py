@@ -1,19 +1,24 @@
-"""Deterministic MVP planner for hosted explainer Reels."""
+"""Deterministic planner for hostless editorial explainer Reels."""
 
 from __future__ import annotations
 
 from app.content.explainer_schemas import ExplainerPlan, ExplainerScene
-from app.host.host_profile import HostProfile
 
 
-def plan_explainer_host_reel(topic: str, niche: str, host: HostProfile) -> ExplainerPlan:
+def plan_editorial_explainer_reel(topic: str, niche: str) -> ExplainerPlan:
     normalized = " ".join(topic.strip().split()) or "What is the relationship between oil prices and the dollar?"
     if "oil" in normalized.lower() and "dollar" in normalized.lower():
-        return _oil_dollar_plan(normalized, niche, host)
-    return _generic_plan(normalized, niche, host)
+        return _oil_dollar_plan(normalized, niche)
+    return _generic_plan(normalized, niche)
 
 
-def _oil_dollar_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan:
+def plan_explainer_host_reel(topic: str, niche: str, host: object | None = None) -> ExplainerPlan:
+    """Compatibility wrapper; the returned plan is hostless."""
+
+    return plan_editorial_explainer_reel(topic, niche)
+
+
+def _oil_dollar_plan(topic: str, niche: str) -> ExplainerPlan:
     return ExplainerPlan(
         topic=topic,
         niche=niche or "economy",
@@ -44,10 +49,9 @@ def _oil_dollar_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan
                 scene_number=1,
                 duration_seconds=4.8,
                 role="hook",
-                visual_type="host_ai",
-                visual_goal=f"{host.name} introduces the oil and dollar question from a cinematic education studio.",
-                media_query="fictional host economy explainer studio oil dollar",
-                host_line="Oil and the dollar are connected, but not by a simple magic switch.",
+                visual_type="stock_video",
+                visual_goal="Real-world establishing shot of oil logistics, fuel infrastructure, or tanker activity with a strong vertical focal point.",
+                media_query="oil tanker fuel logistics energy infrastructure vertical",
                 voiceover_line="Oil and the dollar are connected, but not by a simple magic switch.",
                 on_screen_text="OIL VS DOLLAR",
                 caption_priority_words=["oil", "dollar", "connected"],
@@ -73,8 +77,8 @@ def _oil_dollar_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan
                 scene_number=3,
                 duration_seconds=6.6,
                 role="mechanism",
-                visual_type="generated_chart",
-                visual_goal="Clean cause-effect chain showing oil price rise, import bill rise, dollar demand, and currency pressure.",
+                visual_type="premium_infographic",
+                visual_goal="Polished editorial cause-effect chain showing oil price rise, import bill rise, dollar demand, and currency pressure.",
                 media_query="oil price import bill dollar demand currency pressure diagram",
                 voiceover_line="If oil rises, import bills can rise too. That can add dollar demand and pressure local currencies.",
                 on_screen_text="THE CHAIN",
@@ -87,9 +91,9 @@ def _oil_dollar_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan
                 scene_number=4,
                 duration_seconds=5.7,
                 role="example",
-                visual_type="wikimedia_image",
-                visual_goal="Global trade, currency, or oil market context visual with safe license metadata.",
-                media_query="crude oil tanker currency exchange market",
+                visual_type="stock_photo",
+                visual_goal="Importer or exporter context using shipping, fuel pricing, port logistics, or commodity flow imagery.",
+                media_query="shipping port oil trade fuel import export vertical",
                 voiceover_line="For exporters, higher oil can mean more dollar revenue, so the effect is different by country.",
                 on_screen_text="EXPORTERS DIFFER",
                 caption_priority_words=["exporters", "revenue"],
@@ -101,10 +105,9 @@ def _oil_dollar_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan
                 scene_number=5,
                 duration_seconds=5.1,
                 role="takeaway",
-                visual_type="host_ai",
-                visual_goal=f"{host.name} closes with a calm takeaway beside a simple economy graphic.",
-                media_query="fictional host economy explainer takeaway",
-                host_line="So the answer is: connected, but indirect.",
+                visual_type="premium_infographic",
+                visual_goal="Premium editorial summary card over subtle energy-market texture: indirect relationship, context matters.",
+                media_query="oil dollar indirect relationship context matters editorial infographic",
                 voiceover_line="So the answer is: connected, but indirect. Inflation, rates, trade balance, and risk sentiment matter too.",
                 on_screen_text="INDIRECT, NOT FIXED",
                 caption_priority_words=["indirect", "rates", "risk"],
@@ -116,7 +119,7 @@ def _oil_dollar_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan
     )
 
 
-def _generic_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan:
+def _generic_plan(topic: str, niche: str) -> ExplainerPlan:
     return ExplainerPlan(
         topic=topic,
         niche=niche or "science",
@@ -138,8 +141,8 @@ def _generic_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan:
                 scene_number=1,
                 duration_seconds=4.5,
                 role="hook",
-                visual_type="host_ai",
-                visual_goal=f"{host.name} introduces {topic} in a clean educational studio.",
+                visual_type="stock_photo",
+                visual_goal=f"Real-world establishing image that makes {topic} understandable in one second.",
                 media_query=topic,
                 voiceover_line=f"Here is the simple version of {topic.rstrip('?')}.",
                 on_screen_text="SIMPLE VERSION",
@@ -158,8 +161,8 @@ def _generic_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan:
                 scene_number=3,
                 duration_seconds=6.0,
                 role="mechanism",
-                visual_type="generated_chart",
-                visual_goal=f"Simple cause-effect chart explaining {topic}.",
+                visual_type="premium_infographic",
+                visual_goal=f"Polished editorial cause-effect infographic explaining {topic}.",
                 media_query=topic,
                 voiceover_line="Then follow the chain: one pressure creates another pressure.",
                 on_screen_text="FOLLOW THE CHAIN",
@@ -178,8 +181,8 @@ def _generic_plan(topic: str, niche: str, host: HostProfile) -> ExplainerPlan:
                 scene_number=5,
                 duration_seconds=5.0,
                 role="takeaway",
-                visual_type="host_ai",
-                visual_goal=f"{host.name} closes with a concise takeaway.",
+                visual_type="premium_infographic",
+                visual_goal=f"Premium editorial takeaway frame summarizing {topic}.",
                 media_query=topic,
                 voiceover_line="The useful answer is the one that keeps the caveat attached.",
                 on_screen_text="KEEP THE CAVEAT",

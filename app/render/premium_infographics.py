@@ -45,23 +45,26 @@ def _draw_background(draw: ImageDraw.ImageDraw) -> None:
     width, height = REEL_SIZE
     for y in range(height):
         t = y / height
-        r = int(17 + 14 * t)
-        g = int(24 + 26 * t)
-        b = int(29 + 24 * t)
+        r = int(18 + 20 * t)
+        g = int(24 + 24 * t)
+        b = int(28 + 18 * t)
         draw.line((0, y, width, y), fill=(r, g, b, 255))
-    draw.ellipse((-240, 120, 600, 820), fill=(224, 142, 64, 54))
-    draw.ellipse((430, 260, 1350, 1120), fill=(55, 159, 184, 46))
-    draw.ellipse((180, 980, 1150, 1800), fill=(74, 183, 132, 34))
-    for y in range(320, 1360, 150):
-        draw.line((74, y, 1006, y + 80), fill=(255, 255, 255, 15), width=2)
+    draw.rectangle((0, 0, width, 330), fill=(11, 16, 20, 96))
+    draw.rectangle((0, 1480, width, height), fill=(12, 17, 20, 88))
+    for y in range(360, 1390, 170):
+        draw.line((72, y, 1008, y + 54), fill=(255, 255, 255, 13), width=2)
+    for x in range(94, 1040, 118):
+        draw.line((x, 355, x - 62, 1430), fill=(255, 255, 255, 8), width=1)
+    draw.line((86, 340, 994, 340), fill=(236, 194, 112, 55), width=2)
+    draw.line((86, 1470, 994, 1470), fill=(236, 194, 112, 45), width=2)
 
 
 def _draw_header(draw: ImageDraw.ImageDraw, progress: float) -> None:
-    title_font = load_font(size=58, bold=True, warnings=[])
-    subtitle_font = load_font(size=27, bold=True, warnings=[])
+    title_font = load_font(size=52, bold=True, warnings=[])
+    subtitle_font = load_font(size=24, bold=True, warnings=[])
     alpha = int(255 * min(1.0, progress / 0.18))
-    draw.text((86, 190), "Oil-Dollar Chain", font=title_font, fill=(252, 245, 226, alpha))
-    draw.text((88, 262), "one pressure, not the whole story", font=subtitle_font, fill=(222, 210, 176, int(alpha * 0.78)))
+    draw.text((86, 186), "Oil-Dollar Chain", font=title_font, fill=(252, 245, 226, alpha))
+    draw.text((88, 252), "one pressure, not the whole story", font=subtitle_font, fill=(222, 210, 176, int(alpha * 0.78)))
 
 
 def _draw_card(draw: ImageDraw.ImageDraw, x: int, y: int, label: str, index: int, appear: float) -> None:
@@ -79,9 +82,9 @@ def _draw_card(draw: ImageDraw.ImageDraw, x: int, y: int, label: str, index: int
     ]
     accent = colors[index]
     box = (x, y + y_offset, x + width, y + y_offset + height)
-    draw.rounded_rectangle((box[0] + 12, box[1] + 16, box[2] + 12, box[3] + 16), radius=28, fill=(0, 0, 0, int(85 * ease)))
-    draw.rounded_rectangle(box, radius=28, fill=(29, 39, 44, alpha), outline=(*accent, int(210 * ease)), width=4)
-    draw.rounded_rectangle((x + 24, y + y_offset + 24, x + 116, y + y_offset + 116), radius=24, fill=(*accent, int(230 * ease)))
+    draw.rounded_rectangle((box[0] + 10, box[1] + 14, box[2] + 10, box[3] + 14), radius=18, fill=(0, 0, 0, int(78 * ease)))
+    draw.rounded_rectangle(box, radius=18, fill=(29, 39, 44, alpha), outline=(*accent, int(205 * ease)), width=3)
+    draw.rounded_rectangle((x + 24, y + y_offset + 24, x + 116, y + y_offset + 116), radius=14, fill=(*accent, int(230 * ease)))
     _draw_icon(draw, x + 70, y + y_offset + 70, index, ease)
     font = load_font(size=40 if len(label) <= 12 else 34, bold=True, warnings=[])
     lines = label.split(" ", 1)
@@ -136,10 +139,10 @@ def _draw_caveat(draw: ImageDraw.ImageDraw, appear: float) -> None:
     ease = 1 - math.cos(appear * math.pi / 2)
     alpha = int(245 * ease)
     box = (112, 1210, 968, 1440)
-    draw.rounded_rectangle((box[0] + 12, box[1] + 18, box[2] + 12, box[3] + 18), radius=30, fill=(0, 0, 0, int(92 * ease)))
-    draw.rounded_rectangle(box, radius=30, fill=(246, 239, 218, alpha), outline=(247, 189, 92, alpha), width=4)
-    font = load_font(size=52, bold=True, warnings=[])
-    small = load_font(size=32, bold=True, warnings=[])
+    draw.rounded_rectangle((box[0] + 10, box[1] + 14, box[2] + 10, box[3] + 14), radius=18, fill=(0, 0, 0, int(82 * ease)))
+    draw.rounded_rectangle(box, radius=18, fill=(246, 239, 218, alpha), outline=(247, 189, 92, alpha), width=3)
+    font = load_font(size=48, bold=True, warnings=[])
+    small = load_font(size=29, bold=True, warnings=[])
     text = "Not Always."
     width, height = text_size(draw, text, font)
     draw.text(((REEL_SIZE[0] - width) // 2, 1262), text, font=font, fill=(32, 36, 35, alpha))

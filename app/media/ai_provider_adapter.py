@@ -7,12 +7,12 @@ from app.media.media_item import MediaItem
 
 def ai_media_item(title: str, local_path: str = "") -> MediaItem:
     return MediaItem(
-        provider="ai",
-        media_type="ai_image",
+        provider="ai_generated",
+        media_type="generated_ai_prompt",
         title=title,
         local_path=local_path,
         license="AI-generated image",
-        attribution="Generated with configured AI image provider",
+        attribution="Generated with configured AI image provider after Pexels-first sourcing failed",
         relevance_score=86,
         vertical_usability_score=92,
         license_safety_score=80,

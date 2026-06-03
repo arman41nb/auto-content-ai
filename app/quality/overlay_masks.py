@@ -14,6 +14,15 @@ def get_expected_overlay_regions(
     """Return approximate regions occupied by intentional Pillow-rendered text."""
 
     width, height = output_size
+    if template_name.startswith("editorial_explainer_reel"):
+        regions = [
+            _region("scene_label", 58, 58, 360, 132, width, height),
+            _region("handle", width - 360, height - 130, width - 58, height - 56, width, height),
+            _region("headline_subtext_box", 58, int(height * 0.56), width - 100, height - 260, width, height),
+            _region("subtle_gradient", 0, int(height * 0.54), width, height, width, height),
+        ]
+        return regions
+
     if template_name.startswith("cinematic_reel_editorial"):
         regions = [
             _region("tag_badge", 58, 54, 460, 134, width, height),

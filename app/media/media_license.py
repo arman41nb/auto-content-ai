@@ -5,7 +5,7 @@ from __future__ import annotations
 from app.media.media_item import MediaItem
 
 
-SAFE_LICENSE_TERMS = ("public domain", "cc0", "creative commons", "unsplash", "pexels")
+SAFE_LICENSE_TERMS = ("public domain", "cc0", "creative commons", "pexels")
 
 
 def license_safety_score(item: MediaItem) -> int:
@@ -18,7 +18,7 @@ def license_safety_score(item: MediaItem) -> int:
 
 
 def attribution_payload(items: list[MediaItem]) -> dict[str, object]:
-    external = [item for item in items if item.provider in {"pexels", "unsplash", "wikimedia"} and item.local_path]
+    external = [item for item in items if item.provider == "pexels" and item.local_path]
     return {
         "external_media_used": bool(external),
         "items": [item.model_dump() for item in items],

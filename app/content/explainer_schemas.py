@@ -1,4 +1,4 @@
-"""Schemas and adapters for hosted explainer Reel plans."""
+"""Schemas and adapters for hostless editorial explainer Reel plans."""
 
 from __future__ import annotations
 
@@ -13,14 +13,26 @@ from app.content.schemas import CarouselPlan, CarouselSlide, count_words
 
 SceneRole = Literal["hook", "setup", "mechanism", "example", "takeaway"]
 VisualType = Literal[
-    "host_ai",
     "ai_image",
     "stock_photo",
     "stock_video",
-    "wikimedia_image",
-    "generated_chart",
-    "simple_motion_graphic",
+    "premium_infographic",
 ]
+
+FORBIDDEN_CHARACTER_TERMS = (
+    "mascot",
+    "fictional host",
+    "host",
+    "cartoon animal",
+    "toy robot",
+    "robot mascot",
+    "anthropomorphic",
+    "chibi",
+    "miko",
+    "nova",
+    "fox-like",
+    "character guide",
+)
 
 
 class ExplainerScene(BaseModel):
@@ -32,7 +44,6 @@ class ExplainerScene(BaseModel):
     visual_type: VisualType
     visual_goal: str = Field(..., min_length=1, max_length=500)
     media_query: str = Field(..., min_length=1, max_length=180)
-    host_line: str = Field(default="", max_length=220)
     voiceover_line: str = Field(..., min_length=1, max_length=260)
     on_screen_text: str = Field(..., min_length=1, max_length=80)
     caption_priority_words: list[str] = Field(default_factory=list, max_length=8)
@@ -40,10 +51,15 @@ class ExplainerScene(BaseModel):
     needs_fact_check: bool = False
     source_needed: bool = False
 
-    @field_validator("visual_goal", "media_query", "host_line", "voiceover_line", "on_screen_text", "fact_claim")
+    @field_validator("visual_goal", "media_query", "voiceover_line", "on_screen_text", "fact_claim")
     @classmethod
     def normalize_text(cls, value: str) -> str:
-        return " ".join(value.strip().split())
+        clean = " ".join(value.strip().split())
+        lower = clean.lower()
+        for term in FORBIDDEN_CHARACTER_TERMS:
+            if _contains_forbidden_term(lower, term):
+                raise ValueError(f"Explainer scenes must not use fictional character layer term: {term}.")
+        return clean
 
     @field_validator("voiceover_line")
     @classmethod
@@ -86,12 +102,29 @@ class ExplainerPlan(BaseModel):
         total = sum(scene.duration_seconds for scene in self.scenes)
         if not 20 <= total <= 35:
             raise ValueError(f"Explainer Reel duration must be 20-35 seconds. Got {total:.1f}.")
-        host_count = sum(1 for scene in self.scenes if scene.visual_type == "host_ai")
-        if not 1 <= host_count <= 2:
-            raise ValueError("Host must appear in 1-2 scenes.")
+        if any(scene.visual_type == "ai_image" for scene in self.scenes[:2]):
+            raise ValueError("Opening explainer scenes must try real media or infographic before AI fallback.")
+        if not any(scene.visual_type in {"stock_photo", "stock_video"} for scene in self.scenes):
+            raise ValueError("Explainer plan must include at least one real-world stock-media scene.")
+        if not any(scene.visual_type == "premium_infographic" for scene in self.scenes):
+            raise ValueError("Explainer plan must include a polished infographic mechanism scene.")
         script_words = count_words(self.voiceover_script)
         if not 45 <= script_words <= 105:
             raise ValueError(f"Explainer voiceover should be 45-105 words. Got {script_words}.")
+        plan_text = " ".join(
+            [
+                self.topic,
+                self.explainer_angle,
+                self.hook,
+                self.core_question,
+                self.simple_answer,
+                self.caption,
+                *self.caveats,
+            ]
+        ).lower()
+        for term in FORBIDDEN_CHARACTER_TERMS:
+            if _contains_forbidden_term(plan_text, term):
+                raise ValueError(f"Explainer plan must not use fictional character layer term: {term}.")
         return self
 
     @property
@@ -112,7 +145,7 @@ def explainer_plan_to_reel_plan(plan: ExplainerPlan) -> ReelPlan:
                 visual_prompt=scene.visual_goal,
                 on_screen_text=scene.on_screen_text,
                 voiceover_line=scene.voiceover_line,
-                camera_motion="slow educational push-in with subtle lateral pan",
+                camera_motion="subtle editorial hold from final composed slide",
                 transition="fade" if scene.scene_number in {2, 4} else "cut",
             )
             for scene in plan.scenes
@@ -140,7 +173,7 @@ def explainer_plan_to_carousel_plan(plan: ExplainerPlan) -> CarouselPlan:
                 visual_goal=scene.visual_goal,
                 image_prompt=scene.visual_goal,
                 text_position="bottom_left",
-                composition_hint="full-screen 9:16 explainer frame with clean caption-safe lower third",
+                composition_hint="full-screen 9:16 editorial explainer frame with clean caption-safe lower third",
                 fact_claim=scene.fact_claim or scene.voiceover_line,
                 needs_fact_check=scene.needs_fact_check,
             )
@@ -149,7 +182,7 @@ def explainer_plan_to_carousel_plan(plan: ExplainerPlan) -> CarouselPlan:
         topic=plan.topic,
         niche=plan.niche,
         title=plan.core_question,
-        selected_pattern="explainer_host_reel",
+        selected_pattern="editorial_explainer_reel",
         content_angle=plan.explainer_angle,
         target_audience=plan.target_audience,
         tone="professional, calm, useful, premium short explainer",
@@ -162,3 +195,8 @@ def explainer_plan_to_carousel_plan(plan: ExplainerPlan) -> CarouselPlan:
 def _cover_text(topic: str) -> str:
     words = [word.upper() for word in re.findall(r"[A-Za-z0-9]+", topic) if word.lower() not in {"what", "is", "the"}]
     return " ".join(words[:5]) or "EXPLAINED"
+
+
+def _contains_forbidden_term(text: str, term: str) -> bool:
+    pattern = r"(?<![a-z0-9])" + re.escape(term.lower()) + r"(?![a-z0-9])"
+    return re.search(pattern, text) is not None

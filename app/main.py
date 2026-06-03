@@ -17,24 +17,11 @@ from types import SimpleNamespace
 from PIL import Image
 
 from app.config import load_config
-from app.content.explainer_planner import plan_explainer_host_reel
+from app.content.explainer_planner import plan_editorial_explainer_reel
 from app.content.explainer_schemas import (
     ExplainerPlan,
     explainer_plan_to_carousel_plan,
     explainer_plan_to_reel_plan,
-)
-from app.content.hybrid_story_planner import plan_hybrid_story_reel
-from app.content.hybrid_story_prompt_templates import build_hybrid_scene_image_prompt
-from app.content.hybrid_story_schemas import (
-    HybridStoryPlan,
-    hybrid_story_plan_to_carousel_plan,
-    hybrid_story_plan_to_reel_plan,
-)
-from app.content.mascot_story_planner import plan_mascot_story_reel
-from app.content.mascot_story_schemas import (
-    MascotStoryPlan,
-    mascot_story_plan_to_carousel_plan,
-    mascot_story_plan_to_reel_plan,
 )
 from app.content.planner import CarouselPlanner
 from app.content.reel_schemas import (
@@ -46,9 +33,6 @@ from app.content.reel_schemas import (
 from app.content.schemas import CarouselPlan
 from app.discovery.discovery_pipeline import DiscoveryPipeline, write_discovery_reports
 from app.discovery.schemas import TopicCandidate
-from app.host.host_consistency import host_consistency_report
-from app.host.host_profile import HostProfile, load_host_profile
-from app.host.host_prompt import build_host_reference_prompt, build_host_scene_prompt
 from app.image.pollinations_client import PollinationsClient
 from app.image.prompt_builder import build_image_prompt
 from app.image.quality import score_candidate, select_best_candidate, selection_to_dict
@@ -57,39 +41,23 @@ from app.llm.provider_factory import build_llm_providers
 from app.quality.candidate_scorer import score_candidate_folder
 from app.quality.contact_sheet import create_batch_contact_sheet, create_qa_contact_sheet
 from app.quality.explainer_quality import run_explainer_quality_gate
-from app.quality.hybrid_story_quality import run_hybrid_story_quality_gate
-from app.quality.mascot_story_quality import (
-    run_mascot_story_quality_gate,
-    write_mascot_story_technical_report,
-)
 from app.quality.native_reel_quality import run_native_reel_quality_gate
 from app.quality.overlay_masks import get_expected_overlay_regions
 from app.quality.post_quality_gate import PostQualityReport, run_post_quality_gate
 from app.render.carousel_renderer import CarouselRenderer
-from app.render.explainer_host_reel_renderer import export_explainer_host_reel
-from app.render.hybrid_story_reel_renderer import export_hybrid_story_reel
+from app.render.explainer_host_reel_renderer import export_explainer_host_reel, render_explainer_final_slides
 from app.render.kinetic_captions import (
     build_caption_timing_from_srt,
     caption_quality_metrics,
     render_kinetic_caption_video,
     write_caption_srt,
 )
-from app.render.media_utils import audio_duration_seconds, ffprobe_summary, has_audio_stream, media_dimensions, video_duration_seconds
-from app.render.mascot_story_reel_renderer import export_mascot_story_reel
+from app.render.media_utils import audio_duration_seconds, video_duration_seconds
 from app.render.native_reel_renderer import export_native_reel_story, get_ffmpeg_path
 from app.render.reel_exporter import export_reel_package
 from app.render.subtitles import build_subtitle_cues, write_subtitle_files
-from app.media.hybrid_media_planner import create_hybrid_media_plan
 from app.media.media_planner import create_media_plan
 from app.media.visual_fallbacks import missing_media_api_keys
-from app.mascot.mascot_consistency import ensure_mascot_reference_assets, mascot_consistency_report
-from app.mascot.mascot_profile import MascotProfile, load_mascot_profile
-from app.mascot.mascot_prompt import build_mascot_scene_prompt
-from app.mascot.mascot_scene_generator import (
-    build_production_mascot_scene_prompt,
-    build_production_non_mascot_scene_prompt,
-    create_neutral_scene_fallback,
-)
 from app.research.research_pack_loader import load_research_pack
 from app.research.web_research_pack import load_explainer_research_pack
 from app.storage.post_exporter import PostExporter
@@ -113,25 +81,19 @@ def build_parser() -> argparse.ArgumentParser:
         default="cinematic_reel_editorial",
         help="Visual template name for prompt guidance.",
     )
-    generate.add_argument("--mascot", default="miko", help="Mascot id for mascot_story_explainer.")
     generate.add_argument(
         "--media-sources",
         default="mixed",
-        help="Media source mode for mascot explainers: auto, ai, pexels, unsplash, wikimedia, or mixed.",
+        help="Media source mode for editorial explainers. External sourcing is Pexels-first.",
     )
     generate.add_argument("--prefer-video-media", action="store_true", help="Prefer video-capable media search when available.")
-    generate.add_argument("--no-human-host", action="store_true", help="Forbid human host scenes in supported templates.")
     generate.add_argument(
         "--production-visual-minimums",
         action="store_true",
         default=False,
-        help="Enforce production visual minimums for mascot_story_explainer.",
+        help="Enforce production visual minimums for editorial explainers.",
     )
-    generate.add_argument("--hybrid-story-mode", action="store_true", help="Enable hybrid story defaults for hybrid_story_explainer.")
-    generate.add_argument("--allow-questioner", action="store_true", help="Allow a non-host proxy/questioner in hybrid explainers.")
-    generate.add_argument("--max-mascot-frame-share", type=float, default=0.35, help="Maximum target mascot frame share for hybrid explainers.")
-    generate.add_argument("--require-real-world-context-scenes", type=int, default=3, help="Minimum real-world/realistic context scenes for hybrid explainers.")
-    generate.add_argument("--caption-style", default="default", help="Caption style name, e.g. hybrid_editorial.")
+    generate.add_argument("--caption-style", default="default", help="Caption style name.")
     generate.add_argument("--skip-images", action="store_true", help="Only save plan and metadata.")
     generate.add_argument(
         "--skip-render",
@@ -236,25 +198,19 @@ def build_parser() -> argparse.ArgumentParser:
         default="cinematic_reel_editorial",
         help="Visual template name for prompt guidance.",
     )
-    auto.add_argument("--mascot", default="miko", help="Mascot id for mascot_story_explainer.")
     auto.add_argument(
         "--media-sources",
         default="mixed",
-        help="Media source mode for mascot explainers: auto, ai, pexels, unsplash, wikimedia, or mixed.",
+        help="Media source mode for editorial explainers. External sourcing is Pexels-first.",
     )
     auto.add_argument("--prefer-video-media", action="store_true", help="Prefer video-capable media search when available.")
-    auto.add_argument("--no-human-host", action="store_true", help="Forbid human host scenes in supported templates.")
     auto.add_argument(
         "--production-visual-minimums",
         action="store_true",
         default=False,
-        help="Enforce production visual minimums for mascot_story_explainer.",
+        help="Enforce production visual minimums for editorial explainers.",
     )
-    auto.add_argument("--hybrid-story-mode", action="store_true", help="Enable hybrid story defaults for hybrid_story_explainer.")
-    auto.add_argument("--allow-questioner", action="store_true", help="Allow a non-host proxy/questioner in hybrid explainers.")
-    auto.add_argument("--max-mascot-frame-share", type=float, default=0.35, help="Maximum target mascot frame share for hybrid explainers.")
-    auto.add_argument("--require-real-world-context-scenes", type=int, default=3, help="Minimum real-world/realistic context scenes for hybrid explainers.")
-    auto.add_argument("--caption-style", default="default", help="Caption style name, e.g. hybrid_editorial.")
+    auto.add_argument("--caption-style", default="default", help="Caption style name.")
     auto.add_argument(
         "--sources",
         default="static,nasa,wikipedia,gdelt",
@@ -421,28 +377,13 @@ def add_sanitizer_argument(parser: argparse.ArgumentParser) -> None:
 def generate(args: argparse.Namespace) -> int:
     native_reel_mode = is_native_reel_story(args)
     explainer_host_mode = is_explainer_host_reel(args)
-    mascot_story_mode = is_mascot_story_explainer(args)
-    hybrid_story_mode = is_hybrid_story_explainer(args)
+    if is_disabled_character_template(args):
+        raise ValueError(
+            "Character-led explainer templates are disabled. "
+            "Use --template editorial_explainer_reel (or the explainer_host_reel compatibility alias) for the hostless editorial pipeline."
+        )
     if native_reel_mode and args.image_variants < 3:
         args.image_variants = 3
-    if hybrid_story_mode:
-        args.mascot = str(getattr(args, "mascot", "") or "miko")
-        args.media_sources = str(getattr(args, "media_sources", "") or "mixed")
-        args.prefer_video_media = True
-        args.no_human_host = True
-        args.allow_questioner = True
-        args.production_visual_minimums = True
-        args.hybrid_story_mode = True
-        args.max_mascot_frame_share = float(getattr(args, "max_mascot_frame_share", 0.35) or 0.35)
-        args.require_real_world_context_scenes = int(getattr(args, "require_real_world_context_scenes", 3) or 3)
-        if str(getattr(args, "caption_style", "") or "default") == "default":
-            args.caption_style = "hybrid_editorial"
-    if mascot_story_mode:
-        args.mascot = str(getattr(args, "mascot", "") or "miko")
-        args.media_sources = str(getattr(args, "media_sources", "") or "mixed")
-        args.prefer_video_media = True if getattr(args, "prefer_video_media", False) else True
-        args.no_human_host = True
-        args.production_visual_minimums = True
     if getattr(args, "voiceover", False) and not getattr(args, "make_reel", False):
         args.make_reel = True
     if args.render_only and not args.output_dir:
@@ -467,10 +408,6 @@ def generate(args: argparse.Namespace) -> int:
     planning_info = empty_planning_info()
     reel_plan: ReelPlan | None = None
     explainer_plan: ExplainerPlan | None = None
-    mascot_story_plan: MascotStoryPlan | None = None
-    hybrid_story_plan: HybridStoryPlan | None = None
-    host_profile: HostProfile | None = None
-    mascot_profile: MascotProfile | None = None
     grounding_warnings: list[str] = []
     research_pack_used = "none"
     pattern_library_used = False
@@ -480,19 +417,10 @@ def generate(args: argparse.Namespace) -> int:
         output_dir = resolve_output_dir(config.project_root, args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         plan = load_plan(output_dir / "carousel_plan.json")
-        reel_plan = load_reel_plan(output_dir / "reel_plan.json") if (native_reel_mode or mascot_story_mode or hybrid_story_mode) else None
+        reel_plan = load_reel_plan(output_dir / "reel_plan.json") if native_reel_mode else None
         explainer_plan = load_explainer_plan(output_dir / "explainer_plan.json") if explainer_host_mode else None
-        mascot_story_plan = load_mascot_story_plan(output_dir / "mascot_story_plan.json") if mascot_story_mode else None
-        hybrid_story_plan = load_hybrid_story_plan(output_dir / "hybrid_story_plan.json") if hybrid_story_mode else None
         if explainer_plan is not None:
             reel_plan = explainer_plan_to_reel_plan(explainer_plan)
-            host_profile = load_host_profile()
-        if mascot_story_plan is not None:
-            reel_plan = mascot_story_plan_to_reel_plan(mascot_story_plan)
-            mascot_profile = load_mascot_profile(mascot_story_plan.mascot_id)
-        if hybrid_story_plan is not None:
-            reel_plan = hybrid_story_plan_to_reel_plan(hybrid_story_plan)
-            mascot_profile = load_mascot_profile(hybrid_story_plan.mascot_id)
         existing_metadata = load_existing_metadata(output_dir)
         apply_plan_defaults(args, plan)
     elif args.plan_file:
@@ -511,65 +439,8 @@ def generate(args: argparse.Namespace) -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
         exporter.save_plan(output_dir, plan)
         planning_info = empty_planning_info(provider="plan_file", model=str(resolve_output_dir(config.project_root, args.plan_file)))
-    elif hybrid_story_mode:
-        topic = str(args.topic or "What is the relationship between oil prices and the dollar?")
-        mascot_profile = load_mascot_profile(str(getattr(args, "mascot", "miko") or "miko"))
-        research_result = load_explainer_research_pack(
-            topic=topic,
-            niche=str(args.niche or "economy"),
-            research_root=config.project_root / "data" / "research",
-        )
-        grounding_warnings = [str(warning) for warning in research_result.get("warnings", []) if str(warning).strip()]
-        warnings.extend(grounding_warnings)
-        research_pack_used = str(research_result.get("path", "")) if research_result.get("used") else "none"
-        hybrid_story_plan = plan_hybrid_story_reel(topic, str(args.niche or "economy"), mascot_profile)
-        reel_plan = hybrid_story_plan_to_reel_plan(hybrid_story_plan)
-        plan = hybrid_story_plan_to_carousel_plan(hybrid_story_plan)
-        args.topic = hybrid_story_plan.topic
-        args.niche = hybrid_story_plan.niche
-        args.slides = len(hybrid_story_plan.scenes)
-        output_dir = (
-            resolve_output_dir(config.project_root, args.output_dir)
-            if args.output_dir
-            else exporter.create_output_dir(hybrid_story_plan.topic, created_at)
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Output: {output_dir}")
-        exporter.save_plan(output_dir, plan)
-        save_reel_plan(output_dir, reel_plan)
-        save_hybrid_story_plan(output_dir, hybrid_story_plan)
-        planning_info = empty_planning_info(provider="deterministic", model="hybrid_story_explainer/topic_factory")
-    elif mascot_story_mode:
-        topic = str(args.topic or "What is the relationship between oil prices and the dollar?")
-        mascot_profile = load_mascot_profile(str(getattr(args, "mascot", "miko") or "miko"))
-        research_result = load_explainer_research_pack(
-            topic=topic,
-            niche=str(args.niche or "economy"),
-            research_root=config.project_root / "data" / "research",
-        )
-        grounding_warnings = [str(warning) for warning in research_result.get("warnings", []) if str(warning).strip()]
-        warnings.extend(grounding_warnings)
-        research_pack_used = str(research_result.get("path", "")) if research_result.get("used") else "none"
-        mascot_story_plan = plan_mascot_story_reel(topic, str(args.niche or "economy"), mascot_profile)
-        reel_plan = mascot_story_plan_to_reel_plan(mascot_story_plan)
-        plan = mascot_story_plan_to_carousel_plan(mascot_story_plan)
-        args.topic = mascot_story_plan.topic
-        args.niche = mascot_story_plan.niche
-        args.slides = len(mascot_story_plan.scenes)
-        output_dir = (
-            resolve_output_dir(config.project_root, args.output_dir)
-            if args.output_dir
-            else exporter.create_output_dir(mascot_story_plan.topic, created_at)
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Output: {output_dir}")
-        exporter.save_plan(output_dir, plan)
-        save_reel_plan(output_dir, reel_plan)
-        save_mascot_story_plan(output_dir, mascot_story_plan)
-        planning_info = empty_planning_info(provider="deterministic", model="mascot_story_explainer/topic_factory")
     elif explainer_host_mode:
         topic = str(args.topic or "What is the relationship between oil prices and the dollar?")
-        host_profile = load_host_profile()
         research_result = load_explainer_research_pack(
             topic=topic,
             niche=str(args.niche or "economy"),
@@ -578,7 +449,7 @@ def generate(args: argparse.Namespace) -> int:
         grounding_warnings = [str(warning) for warning in research_result.get("warnings", []) if str(warning).strip()]
         warnings.extend(grounding_warnings)
         research_pack_used = str(research_result.get("path", "")) if research_result.get("used") else "none"
-        explainer_plan = plan_explainer_host_reel(topic, str(args.niche or "economy"), host_profile)
+        explainer_plan = plan_editorial_explainer_reel(topic, str(args.niche or "economy"))
         reel_plan = explainer_plan_to_reel_plan(explainer_plan)
         plan = explainer_plan_to_carousel_plan(explainer_plan)
         args.topic = explainer_plan.topic
@@ -594,7 +465,7 @@ def generate(args: argparse.Namespace) -> int:
         exporter.save_plan(output_dir, plan)
         save_reel_plan(output_dir, reel_plan)
         save_explainer_plan(output_dir, explainer_plan)
-        planning_info = empty_planning_info(provider="deterministic", model="explainer_host_reel/topic_factory")
+        planning_info = empty_planning_info(provider="deterministic", model="editorial_explainer_reel/topic_factory")
     elif native_reel_mode:
         discovery_candidate = getattr(args, "topic_discovery_candidate", None)
         topic = str(getattr(discovery_candidate, "topic", None) or args.topic or "What if gravity doubled for one day?")
@@ -677,13 +548,6 @@ def generate(args: argparse.Namespace) -> int:
     args.generated_output_dir = output_dir
     if explainer_host_mode:
         args.explainer_plan = explainer_plan
-        args.host_profile = host_profile
-    if mascot_story_mode:
-        args.mascot_story_plan = mascot_story_plan
-        args.mascot_profile = mascot_profile
-    if hybrid_story_mode:
-        args.hybrid_story_plan = hybrid_story_plan
-        args.mascot_profile = mascot_profile
 
     status = "planned"
     raw_dir = output_dir / "raw_images"
@@ -695,76 +559,26 @@ def generate(args: argparse.Namespace) -> int:
     voiceover_info: dict[str, object] = {"script_created": False, "tts_created": False}
     native_reel_render_metadata: dict[str, object] = {}
     explainer_reel_render_metadata: dict[str, object] = {}
-    mascot_story_render_metadata: dict[str, object] = {}
-    hybrid_story_render_metadata: dict[str, object] = {}
     media_plan_info: dict[str, object] = {}
-    host_consistency: dict[str, object] = {}
-    mascot_consistency: dict[str, object] = {}
     image_model = "none"
     resume_warnings: list[str] = []
 
-    if hybrid_story_mode and hybrid_story_plan is not None:
-        print("Planning hybrid story media sources...")
-        if mascot_profile is None:
-            mascot_profile = load_mascot_profile(str(getattr(args, "mascot", "miko") or "miko"))
-        try:
-            asset_client = PollinationsClient(
-                rate_limit_seconds=args.rate_limit
-                if args.rate_limit is not None
-                else config.pollinations_rate_limit_seconds,
-                width=1080,
-                height=1920,
-                retries=1,
-            )
-            asset_report = ensure_mascot_reference_assets(config.project_root, mascot_profile, image_client=asset_client)
-            warnings.extend(str(warning) for warning in asset_report.get("warnings", []) if str(warning).strip())
-        except Exception as exc:
-            warnings.append(f"Mascot asset generation failed: {exc}")
-        mascot_consistency = mascot_consistency_report(config.project_root, mascot_profile)
-        media_plan_info = create_hybrid_media_plan(
-            hybrid_story_plan,
-            output_dir,
-            raw_dir,
-            media_sources=str(getattr(args, "media_sources", "mixed") or "mixed"),
-            prefer_video_media=bool(getattr(args, "prefer_video_media", True)),
-            relevance_threshold=80,
-            production_visual_minimums=bool(getattr(args, "production_visual_minimums", True)),
-        )
-    if mascot_story_mode and mascot_story_plan is not None:
-        print("Planning mascot story media sources...")
-        if mascot_profile is None:
-            mascot_profile = load_mascot_profile(str(getattr(args, "mascot", "miko") or "miko"))
-        try:
-            asset_client = PollinationsClient(
-                rate_limit_seconds=args.rate_limit
-                if args.rate_limit is not None
-                else config.pollinations_rate_limit_seconds,
-                width=1080,
-                height=1920,
-                retries=1,
-            )
-            asset_report = ensure_mascot_reference_assets(config.project_root, mascot_profile, image_client=asset_client)
-            warnings.extend(str(warning) for warning in asset_report.get("warnings", []) if str(warning).strip())
-        except Exception as exc:
-            warnings.append(f"Mascot asset generation failed: {exc}")
-        mascot_consistency = mascot_consistency_report(config.project_root, mascot_profile)
-        media_plan_info = create_media_plan(
-            mascot_story_plan,
-            output_dir,
-            raw_dir,
-            template="mascot_story_explainer",
-            mascot=mascot_profile,
-            media_sources=str(getattr(args, "media_sources", "mixed") or "mixed"),
-            prefer_video_media=bool(getattr(args, "prefer_video_media", True)),
-            relevance_threshold=80,
-            production_visual_minimums=bool(getattr(args, "production_visual_minimums", True)),
-        )
     if explainer_host_mode and explainer_plan is not None:
-        print("Planning explainer media sources...")
-        media_plan_info = create_media_plan(explainer_plan, output_dir, raw_dir)
-        if host_profile is None:
-            host_profile = load_host_profile()
-        host_consistency = host_consistency_report(config.project_root, host_profile)
+        if args.render_only:
+            media_plan_info = load_json_file(output_dir / "media_plan.json")
+        else:
+            print("Planning explainer media sources...")
+            media_plan_info = create_media_plan(
+                explainer_plan,
+                output_dir,
+                raw_dir,
+                template="editorial_explainer_reel",
+                media_sources=str(getattr(args, "media_sources", "mixed") or "mixed"),
+                prefer_video_media=True,
+                relevance_threshold=75,
+                production_visual_minimums=True,
+            )
+        args.media_plan_info = media_plan_info
 
     if args.render_only:
         missing_raw = missing_raw_images(plan, raw_dir)
@@ -780,41 +594,33 @@ def generate(args: argparse.Namespace) -> int:
             sanitized_dir=sanitized_dir,
             mode=str(getattr(args, "sanitizer_mode", "targeted") or "targeted"),
         )
-        print("Rendering final carousel slides from existing raw images...")
-        renderer = CarouselRenderer(handle=args.handle, template_name=args.template)
-        render_template_used_per_slide = renderer.render_plan(
-            plan,
-            raw_dir=raw_dir,
-            final_dir=final_dir,
-            sanitized_dir=sanitized_dir,
-        )
-        warnings.extend(renderer.warnings)
+        print("Rendering final slides from existing raw images...")
+        if explainer_host_mode and explainer_plan is not None:
+            render_explainer_final_slides(
+                explainer_plan=explainer_plan,
+                image_dir=preferred_image_dir(output_dir, raw_dir),
+                output_dir=output_dir,
+                handle=args.handle,
+            )
+            render_template_used_per_slide = {
+                f"slide_{scene.scene_number:02d}": "editorial_explainer_reel_final_slide"
+                for scene in explainer_plan.scenes
+            }
+        else:
+            renderer = CarouselRenderer(handle=args.handle, template_name=args.template)
+            render_template_used_per_slide = renderer.render_plan(
+                plan,
+                raw_dir=raw_dir,
+                final_dir=final_dir,
+                sanitized_dir=sanitized_dir,
+            )
+            warnings.extend(renderer.warnings)
         if getattr(args, "make_reel", False):
             print("Preparing Reel package...")
-            if hybrid_story_mode and hybrid_story_plan is not None:
-                result = export_hybrid_story_reel(
-                    hybrid_plan=hybrid_story_plan,
-                    image_dir=preferred_image_dir(output_dir, raw_dir),
-                    output_dir=output_dir,
-                    handle=args.handle,
-                    voiceover_duration_seconds=existing_voiceover_duration(output_dir)
-                    if getattr(args, "voiceover", False)
-                    else 0.0,
-                )
-            elif mascot_story_mode and mascot_story_plan is not None:
-                result = export_mascot_story_reel(
-                    story_plan=mascot_story_plan,
-                    image_dir=preferred_image_dir(output_dir, raw_dir),
-                    output_dir=output_dir,
-                    handle=args.handle,
-                    voiceover_duration_seconds=existing_voiceover_duration(output_dir)
-                    if getattr(args, "voiceover", False)
-                    else 0.0,
-                )
-            elif explainer_host_mode and explainer_plan is not None:
+            if explainer_host_mode and explainer_plan is not None:
                 result = export_explainer_host_reel(
                     explainer_plan=explainer_plan,
-                    image_dir=preferred_image_dir(output_dir, raw_dir),
+                    image_dir=final_dir,
                     output_dir=output_dir,
                     handle=args.handle,
                     voiceover_duration_seconds=existing_voiceover_duration(output_dir)
@@ -849,16 +655,8 @@ def generate(args: argparse.Namespace) -> int:
                 reel_export["template"] = "native_reel_story"
                 reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
                 native_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
-            if mascot_story_mode:
-                reel_export["template"] = "mascot_story_explainer"
-                reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
-                mascot_story_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
-            if hybrid_story_mode:
-                reel_export["template"] = "hybrid_story_explainer"
-                reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
-                hybrid_story_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
             if explainer_host_mode:
-                reel_export["template"] = "explainer_host_reel"
+                reel_export["template"] = "editorial_explainer_reel"
                 reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
                 explainer_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
             if result.created_video:
@@ -876,10 +674,6 @@ def generate(args: argparse.Namespace) -> int:
                     reel_plan,
                     explainer_reel_render_metadata
                     if explainer_host_mode
-                    else hybrid_story_render_metadata
-                    if hybrid_story_mode
-                    else mascot_story_render_metadata
-                    if mascot_story_mode
                     else native_reel_render_metadata,
                 )
         metadata = merge_existing_metadata(
@@ -898,12 +692,9 @@ def generate(args: argparse.Namespace) -> int:
                 "voiceover": voiceover_info,
                 "voiceover_requested": bool(getattr(args, "voiceover", False)),
                 "native_reel_render": native_reel_render_metadata if native_reel_mode else {},
-                "mascot_story_render": mascot_story_render_metadata if mascot_story_mode else {},
-                "hybrid_story_render": hybrid_story_render_metadata if hybrid_story_mode else {},
                 "explainer_reel_render": explainer_reel_render_metadata if explainer_host_mode else {},
-                "media_plan": media_plan_info if (explainer_host_mode or mascot_story_mode or hybrid_story_mode) else {},
-                "host_consistency": host_consistency if explainer_host_mode else {},
-                "mascot_consistency": mascot_consistency if (mascot_story_mode or hybrid_story_mode) else {},
+                "media_plan": media_plan_info if explainer_host_mode else {},
+                "fictional_character_layer_removed": bool(explainer_host_mode),
                 "warnings": sorted(set([*warnings, *existing_metadata.get("warnings", [])]))
                 if isinstance(existing_metadata.get("warnings", []), list)
                 else sorted(set(warnings)),
@@ -936,24 +727,6 @@ def generate(args: argparse.Namespace) -> int:
             )
             metadata["explainer_quality"] = explainer_quality
             exporter.save_metadata(output_dir, metadata)
-        if mascot_story_mode and mascot_story_plan is not None:
-            mascot_story_quality = run_mascot_story_quality_gate(
-                output_dir=output_dir,
-                plan=mascot_story_plan,
-                metadata=metadata,
-                voiceover_requested=bool(getattr(args, "voiceover", False)),
-            )
-            metadata["mascot_story_quality"] = mascot_story_quality
-            exporter.save_metadata(output_dir, metadata)
-        if hybrid_story_mode and hybrid_story_plan is not None:
-            hybrid_story_quality = run_hybrid_story_quality_gate(
-                output_dir=output_dir,
-                plan=hybrid_story_plan,
-                metadata=metadata,
-                voiceover_requested=bool(getattr(args, "voiceover", False)),
-            )
-            metadata["hybrid_story_quality"] = hybrid_story_quality
-            exporter.save_metadata(output_dir, metadata)
         quality_report = run_post_quality_gate(output_dir, plan, metadata)
         contact_sheet = create_qa_contact_sheet(
             final_dir=final_dir,
@@ -978,10 +751,6 @@ def generate(args: argparse.Namespace) -> int:
             write_native_reel_redesign_reports(output_dir, quality_report, metadata)
         if explainer_host_mode and explainer_plan is not None:
             write_explainer_host_reports(output_dir, explainer_plan, quality_report, metadata)
-        if mascot_story_mode and mascot_story_plan is not None:
-            write_mascot_story_reports(output_dir, mascot_story_plan, quality_report, metadata)
-        if hybrid_story_mode and hybrid_story_plan is not None:
-            write_hybrid_story_reports(output_dir, hybrid_story_plan, quality_report, metadata)
         print_generation_summary(output_dir, quality_report, resume_suggestion=True)
         return 0
 
@@ -990,23 +759,20 @@ def generate(args: argparse.Namespace) -> int:
             rate_limit_seconds=args.rate_limit
             if args.rate_limit is not None
             else config.pollinations_rate_limit_seconds,
-            width=1080 if native_reel_mode or explainer_host_mode or mascot_story_mode or hybrid_story_mode else 1080,
-            height=1920 if native_reel_mode or explainer_host_mode or mascot_story_mode or hybrid_story_mode else 1350,
+            width=1080,
+            height=1920 if native_reel_mode or explainer_host_mode else 1350,
         )
         image_model = image_client.model
-        if explainer_host_mode and host_profile is not None:
-            try:
-                ensure_host_reference_assets(config.project_root, host_profile, image_client)
-                host_consistency = host_consistency_report(config.project_root, host_profile)
-            except Exception as exc:
-                warnings.append(f"Host reference asset generation failed: {exc}")
         failed_slide_numbers = failed_slide_numbers_from_metadata(existing_metadata) if args.resume else set()
         if args.resume:
             resume_warnings = resume_warnings_for_existing_state(plan, raw_dir, final_dir, failed_slide_numbers)
             warnings.extend(resume_warnings)
             print("Resuming image selection and regenerating only missing or failed raw images...")
         else:
-            print(f"Generating {args.image_variants} image variant(s) per slide with Pollinations.ai...")
+            if explainer_host_mode:
+                print(f"Generating AI fallback variant(s) only where the media plan requires them...")
+            else:
+                print(f"Generating {args.image_variants} image variant(s) per slide with Pollinations.ai...")
 
         image_selection_report = generate_or_select_images(
             args=args,
@@ -1031,45 +797,37 @@ def generate(args: argparse.Namespace) -> int:
                 sanitized_dir=sanitized_dir,
                 mode=str(getattr(args, "sanitizer_mode", "targeted") or "targeted"),
             )
-            print("Rendering final carousel slides...")
-            renderer = CarouselRenderer(handle=args.handle, template_name=args.template)
-            render_template_used_per_slide = renderer.render_plan(
-                plan,
-                raw_dir=raw_dir,
-                final_dir=final_dir,
-                sanitized_dir=sanitized_dir,
-            )
-            warnings.extend(renderer.warnings)
+            print("Rendering final slides...")
+            if explainer_host_mode and explainer_plan is not None:
+                render_explainer_final_slides(
+                    explainer_plan=explainer_plan,
+                    image_dir=preferred_image_dir(output_dir, raw_dir),
+                    output_dir=output_dir,
+                    handle=args.handle,
+                )
+                render_template_used_per_slide = {
+                    f"slide_{scene.scene_number:02d}": "editorial_explainer_reel_final_slide"
+                    for scene in explainer_plan.scenes
+                }
+            else:
+                renderer = CarouselRenderer(handle=args.handle, template_name=args.template)
+                render_template_used_per_slide = renderer.render_plan(
+                    plan,
+                    raw_dir=raw_dir,
+                    final_dir=final_dir,
+                    sanitized_dir=sanitized_dir,
+                )
+                warnings.extend(renderer.warnings)
             status = "complete"
     elif args.skip_render:
         status = "planned"
 
     if getattr(args, "make_reel", False):
         print("Preparing Reel package...")
-        if hybrid_story_mode and hybrid_story_plan is not None:
-            result = export_hybrid_story_reel(
-                hybrid_plan=hybrid_story_plan,
-                image_dir=preferred_image_dir(output_dir, raw_dir),
-                output_dir=output_dir,
-                handle=args.handle,
-                voiceover_duration_seconds=existing_voiceover_duration(output_dir)
-                if getattr(args, "voiceover", False)
-                else 0.0,
-            )
-        elif mascot_story_mode and mascot_story_plan is not None:
-            result = export_mascot_story_reel(
-                story_plan=mascot_story_plan,
-                image_dir=preferred_image_dir(output_dir, raw_dir),
-                output_dir=output_dir,
-                handle=args.handle,
-                voiceover_duration_seconds=existing_voiceover_duration(output_dir)
-                if getattr(args, "voiceover", False)
-                else 0.0,
-            )
-        elif explainer_host_mode and explainer_plan is not None:
+        if explainer_host_mode and explainer_plan is not None:
             result = export_explainer_host_reel(
                 explainer_plan=explainer_plan,
-                image_dir=preferred_image_dir(output_dir, raw_dir),
+                image_dir=final_dir,
                 output_dir=output_dir,
                 handle=args.handle,
                 voiceover_duration_seconds=existing_voiceover_duration(output_dir)
@@ -1104,16 +862,8 @@ def generate(args: argparse.Namespace) -> int:
             reel_export["template"] = "native_reel_story"
             reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
             native_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
-        if mascot_story_mode:
-            reel_export["template"] = "mascot_story_explainer"
-            reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
-            mascot_story_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
-        if hybrid_story_mode:
-            reel_export["template"] = "hybrid_story_explainer"
-            reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
-            hybrid_story_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
         if explainer_host_mode:
-            reel_export["template"] = "explainer_host_reel"
+            reel_export["template"] = "editorial_explainer_reel"
             reel_export["frame_paths"] = [str(path) for path in getattr(result, "frame_paths", [])]
             explainer_reel_render_metadata = getattr(result, "metadata", {}) if isinstance(getattr(result, "metadata", {}), dict) else {}
         if result.created_video:
@@ -1134,10 +884,6 @@ def generate(args: argparse.Namespace) -> int:
                 reel_plan,
                 explainer_reel_render_metadata
                 if explainer_host_mode
-                else hybrid_story_render_metadata
-                if hybrid_story_mode
-                else mascot_story_render_metadata
-                if mascot_story_mode
                 else native_reel_render_metadata,
             )
 
@@ -1163,25 +909,11 @@ def generate(args: argparse.Namespace) -> int:
     metadata["voiceover_requested"] = bool(getattr(args, "voiceover", False))
     if native_reel_mode:
         metadata["native_reel_render"] = native_reel_render_metadata
-    if mascot_story_mode:
-        metadata["mascot_story_render"] = mascot_story_render_metadata
-        metadata["media_plan"] = media_plan_info
-        metadata["mascot_consistency"] = mascot_consistency
-        metadata["human_review_required"] = True
-        metadata["automatic_posting_ready"] = False
-        metadata["human_host_used"] = False
-    if hybrid_story_mode:
-        metadata["hybrid_story_render"] = hybrid_story_render_metadata
-        metadata["media_plan"] = media_plan_info
-        metadata["mascot_consistency"] = mascot_consistency
-        metadata["human_review_required"] = True
-        metadata["automatic_posting_ready"] = False
-        metadata["human_host_used"] = False
-        metadata["caption_style"] = str(getattr(args, "caption_style", "hybrid_editorial") or "hybrid_editorial")
     if explainer_host_mode:
         metadata["explainer_reel_render"] = explainer_reel_render_metadata
         metadata["media_plan"] = media_plan_info
-        metadata["host_consistency"] = host_consistency
+        metadata["fictional_character_layer_removed"] = True
+        metadata["single_source_visual_pipeline"] = True
         metadata["human_review_required"] = True
         metadata["automatic_posting_ready"] = False
     metadata = preserve_existing_context(existing_metadata, metadata)
@@ -1235,24 +967,6 @@ def generate(args: argparse.Namespace) -> int:
         )
         metadata["explainer_quality"] = explainer_quality
         exporter.save_metadata(output_dir, metadata)
-    if mascot_story_mode and mascot_story_plan is not None:
-        mascot_story_quality = run_mascot_story_quality_gate(
-            output_dir=output_dir,
-            plan=mascot_story_plan,
-            metadata=metadata,
-            voiceover_requested=bool(getattr(args, "voiceover", False)),
-        )
-        metadata["mascot_story_quality"] = mascot_story_quality
-        exporter.save_metadata(output_dir, metadata)
-    if hybrid_story_mode and hybrid_story_plan is not None:
-        hybrid_story_quality = run_hybrid_story_quality_gate(
-            output_dir=output_dir,
-            plan=hybrid_story_plan,
-            metadata=metadata,
-            voiceover_requested=bool(getattr(args, "voiceover", False)),
-        )
-        metadata["hybrid_story_quality"] = hybrid_story_quality
-        exporter.save_metadata(output_dir, metadata)
     quality_report = run_post_quality_gate(output_dir, plan, metadata)
     contact_sheet = create_qa_contact_sheet(
         final_dir=final_dir,
@@ -1277,10 +991,6 @@ def generate(args: argparse.Namespace) -> int:
         write_native_reel_redesign_reports(output_dir, quality_report, metadata)
     if explainer_host_mode and explainer_plan is not None:
         write_explainer_host_reports(output_dir, explainer_plan, quality_report, metadata)
-    if mascot_story_mode and mascot_story_plan is not None:
-        write_mascot_story_reports(output_dir, mascot_story_plan, quality_report, metadata)
-    if hybrid_story_mode and hybrid_story_plan is not None:
-        write_hybrid_story_reports(output_dir, hybrid_story_plan, quality_report, metadata)
 
     print("Done.")
     print_generation_summary(output_dir, quality_report, resume_suggestion=not quality_report.publish_ready)
@@ -1760,57 +1470,16 @@ def load_explainer_plan(path: Path) -> ExplainerPlan | None:
     return ExplainerPlan.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def save_mascot_story_plan(output_dir: Path, mascot_story_plan: MascotStoryPlan) -> None:
-    (output_dir / "mascot_story_plan.json").write_text(
-        json.dumps(mascot_story_plan.model_dump(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def load_mascot_story_plan(path: Path) -> MascotStoryPlan | None:
-    if not path.exists():
-        return None
-    return MascotStoryPlan.model_validate_json(path.read_text(encoding="utf-8"))
-
-
-def save_hybrid_story_plan(output_dir: Path, hybrid_story_plan: HybridStoryPlan) -> None:
-    (output_dir / "hybrid_story_plan.json").write_text(
-        json.dumps(hybrid_story_plan.model_dump(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def load_hybrid_story_plan(path: Path) -> HybridStoryPlan | None:
-    if not path.exists():
-        return None
-    return HybridStoryPlan.model_validate_json(path.read_text(encoding="utf-8"))
-
-
 def is_native_reel_story(args: argparse.Namespace) -> bool:
     return str(getattr(args, "template", "") or "").strip() == "native_reel_story"
 
 
 def is_explainer_host_reel(args: argparse.Namespace) -> bool:
-    return str(getattr(args, "template", "") or "").strip() == "explainer_host_reel"
+    return str(getattr(args, "template", "") or "").strip() in {"editorial_explainer_reel", "explainer_host_reel"}
 
 
-def is_mascot_story_explainer(args: argparse.Namespace) -> bool:
-    return str(getattr(args, "template", "") or "").strip() == "mascot_story_explainer"
-
-
-def is_hybrid_story_explainer(args: argparse.Namespace) -> bool:
-    return str(getattr(args, "template", "") or "").strip() == "hybrid_story_explainer"
-
-
-def ensure_host_reference_assets(project_root: Path, host: HostProfile, image_client: PollinationsClient) -> None:
-    asset_root = project_root / "host_assets" / host.host_id
-    asset_root.mkdir(parents=True, exist_ok=True)
-    for index, path in enumerate((asset_root / "reference_01.jpg", asset_root / "reference_02.jpg"), start=1):
-        if path.exists():
-            continue
-        image_client.generate_image(build_host_reference_prompt(host, index), path)
-        if index == 1:
-            image_client.wait_between_requests()
+def is_disabled_character_template(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "template", "") or "").strip() in {"mascot_story_explainer", "hybrid_story_explainer"}
 
 
 def existing_voiceover_duration(output_dir: Path) -> float:
@@ -1917,7 +1586,7 @@ def generate_or_select_images(
     slides_to_generate: list[int] = []
     for slide in plan.slides:
         raw_path = raw_dir / f"slide_{slide.slide_number:02d}.jpg"
-        if (is_explainer_host_reel(args) or is_mascot_story_explainer(args) or is_hybrid_story_explainer(args)) and raw_path.exists() and slide.slide_number not in failed_slide_numbers:
+        if is_explainer_host_reel(args) and raw_path.exists() and slide.slide_number not in failed_slide_numbers:
             continue
         if not args.resume or slide.slide_number in failed_slide_numbers or not raw_path.exists():
             slides_to_generate.append(slide.slide_number)
@@ -1930,10 +1599,6 @@ def generate_or_select_images(
             built_prompt = SimpleNamespace(prompt=build_native_scene_image_prompt(slide.image_prompt, slide.slide_number))
         elif is_explainer_host_reel(args):
             built_prompt = SimpleNamespace(prompt=build_explainer_scene_image_prompt(args, slide.image_prompt, slide.slide_number))
-        elif is_hybrid_story_explainer(args):
-            built_prompt = SimpleNamespace(prompt=build_hybrid_story_scene_image_prompt(args, slide.image_prompt, slide.slide_number))
-        elif is_mascot_story_explainer(args):
-            built_prompt = SimpleNamespace(prompt=build_mascot_story_scene_image_prompt(args, slide.image_prompt, slide.slide_number))
         variant_paths = existing_variant_paths(raw_dir, slide.slide_number)
         selected_raw = raw_dir / f"slide_{slide.slide_number:02d}.jpg"
         if args.resume and selected_raw.exists() and selected_raw not in variant_paths:
@@ -1942,6 +1607,9 @@ def generate_or_select_images(
         slide_generation_warnings: list[str] = []
 
         print(f"  [{slide.slide_number:02d}/{len(plan.slides):02d}] {slide.visual_goal}")
+        if is_explainer_host_reel(args) and not should_generate and selected_raw.exists():
+            report["slides"].append(_media_plan_asset_selection_report(args, slide.slide_number, selected_raw))
+            continue
         if should_generate:
             if not args.resume:
                 variant_paths = []
@@ -1958,12 +1626,7 @@ def generate_or_select_images(
                 try:
                     image_client.generate_image(variant_prompt, variant_path)
                 except Exception as exc:
-                    if not (is_mascot_story_explainer(args) or is_hybrid_story_explainer(args)):
-                        raise
-                    create_neutral_scene_fallback(_hybrid_or_mascot_scene_for_slide(args, slide.slide_number), variant_path)
-                    slide_generation_warnings.append(
-                        f"AI image provider failed for scene {slide.slide_number:02d}; neutral non-mascot fallback created and review is required: {exc}"
-                    )
+                    raise
                 variant_paths.append(variant_path)
                 request_count += 1
                 if request_count < total_requests:
@@ -2022,6 +1685,35 @@ def existing_variant_paths(raw_dir: Path, slide_number: int) -> list[Path]:
     return sorted(raw_dir.glob(f"slide_{slide_number:02d}_variant_*.jpg"))
 
 
+def _media_plan_asset_selection_report(args: argparse.Namespace, slide_number: int, selected_raw: Path) -> dict[str, object]:
+    media_scene = _media_plan_scene(args, slide_number)
+    source = str(media_scene.get("selected_source_type", "media_plan_asset") if isinstance(media_scene, dict) else "media_plan_asset")
+    prompt = str(media_scene.get("generated_ai_prompt") or media_scene.get("scene_intent") or "") if isinstance(media_scene, dict) else ""
+    reason = str(media_scene.get("why_selected", "") if isinstance(media_scene, dict) else "")
+    return {
+        "slide_number": slide_number,
+        "prompt_used": prompt,
+        "variant_filenames": [selected_raw.name],
+        "selected_variant": selected_raw.name,
+        "chosen_variant": 1,
+        "rejected_variants": [],
+        "scores": [],
+        "selection_reason": reason or f"Using {source} asset selected by the media decision pipeline.",
+        "image_quality_warnings": [],
+        "selected_source_type": source,
+    }
+
+
+def _media_plan_scene(args: argparse.Namespace, slide_number: int) -> dict[str, object]:
+    media_plan = getattr(args, "media_plan_info", {})
+    scenes = media_plan.get("scenes", []) if isinstance(media_plan, dict) else []
+    if isinstance(scenes, list):
+        for scene in scenes:
+            if isinstance(scene, dict) and int(scene.get("scene_number", 0) or 0) == slide_number:
+                return scene
+    return {}
+
+
 def build_native_scene_image_prompt(base_prompt: str, scene_number: int, alternate: bool = False) -> str:
     scene_angles = {
         1: "wide establishing view with clear scale and tiny human silhouettes",
@@ -2050,79 +1742,23 @@ def build_native_scene_image_prompt(base_prompt: str, scene_number: int, alterna
 
 
 def build_explainer_scene_image_prompt(args: argparse.Namespace, base_prompt: str, scene_number: int) -> str:
-    explainer_plan = getattr(args, "explainer_plan", None)
-    host_profile = getattr(args, "host_profile", None)
-    scene = None
-    if isinstance(explainer_plan, ExplainerPlan) and 1 <= scene_number <= len(explainer_plan.scenes):
-        scene = explainer_plan.scenes[scene_number - 1]
-    if scene is not None and scene.visual_type == "host_ai" and isinstance(host_profile, HostProfile):
-        return build_host_scene_prompt(host_profile, scene.visual_goal, scene_number)
+    media_scene = _media_plan_scene(args, scene_number)
+    strict_fallback_prompt = ""
+    if media_scene and bool(media_scene.get("ai_generation_required", False)):
+        strict_fallback_prompt = str(media_scene.get("generated_ai_prompt", "") or "")
+    source_prompt = strict_fallback_prompt or base_prompt
     return " ".join(
         part.strip()
         for part in [
-            base_prompt,
-            "premium educational explainer visual, cinematic but natural, native vertical 9:16 composition",
+            source_prompt,
+            "premium editorial explainer visual, cinematic but natural, real-world grounded, native vertical 9:16 composition",
             "clear subject, clean lower-third safe area for captions, no poster layout, no giant black boxes",
+            "no presenter figure, no guide figure, no animal-shaped figure, no toy-like machine figure, no cute 3D figure, no childish flat illustration",
+            "if showing documents, avoid readable fake text; keep documents blurred or de-emphasized",
             "strict image-only rule: no text, no letters, no words, no signs, no labels, no logos, no watermark, no typography",
         ]
         if part.strip()
     )
-
-
-def build_mascot_story_scene_image_prompt(args: argparse.Namespace, base_prompt: str, scene_number: int) -> str:
-    mascot_story_plan = getattr(args, "mascot_story_plan", None)
-    mascot_profile = getattr(args, "mascot_profile", None)
-    scene = None
-    if isinstance(mascot_story_plan, MascotStoryPlan) and 1 <= scene_number <= len(mascot_story_plan.scenes):
-        scene = mascot_story_plan.scenes[scene_number - 1]
-    if scene is not None and scene.visual_type in {"mascot_ai", "mixed"} and isinstance(mascot_profile, MascotProfile):
-        return build_production_mascot_scene_prompt(mascot_profile, scene, scene_number)
-    if scene is not None:
-        return build_production_non_mascot_scene_prompt(scene)
-    return " ".join(
-        part.strip()
-        for part in [
-            base_prompt,
-            "premium educational mascot story visual, native vertical 9:16 composition",
-            "concrete visual scene, clean lower-third safe area for kinetic captions, no poster layout",
-            "strict image-only rule: no text, no letters, no words, no signs, no labels, no logos, no watermark, no typography",
-        ]
-        if part.strip()
-    )
-
-
-def build_hybrid_story_scene_image_prompt(args: argparse.Namespace, base_prompt: str, scene_number: int) -> str:
-    hybrid_story_plan = getattr(args, "hybrid_story_plan", None)
-    mascot_profile = getattr(args, "mascot_profile", None)
-    scene = None
-    if isinstance(hybrid_story_plan, HybridStoryPlan) and 1 <= scene_number <= len(hybrid_story_plan.scenes):
-        scene = hybrid_story_plan.scenes[scene_number - 1]
-    if scene is not None:
-        return build_hybrid_scene_image_prompt(
-            mascot_profile if isinstance(mascot_profile, MascotProfile) else None,
-            scene,
-            scene_number,
-        )
-    return " ".join(
-        part.strip()
-        for part in [
-            base_prompt,
-            "premium hybrid story explainer visual, native vertical 9:16 composition",
-            "concrete real-world context, clean caption-safe area, no poster layout",
-            "strict image-only rule: no text, no letters, no words, no signs, no labels, no logos, no watermark, no typography",
-        ]
-        if part.strip()
-    )
-
-
-def _hybrid_or_mascot_scene_for_slide(args: argparse.Namespace, slide_number: int) -> object:
-    hybrid_story_plan = getattr(args, "hybrid_story_plan", None)
-    if isinstance(hybrid_story_plan, HybridStoryPlan) and 1 <= slide_number <= len(hybrid_story_plan.scenes):
-        return hybrid_story_plan.scenes[slide_number - 1]
-    mascot_story_plan = getattr(args, "mascot_story_plan", None)
-    if isinstance(mascot_story_plan, MascotStoryPlan) and 1 <= slide_number <= len(mascot_story_plan.scenes):
-        return mascot_story_plan.scenes[slide_number - 1]
-    return SimpleNamespace(role="", media_query="", visual_goal="")
 
 
 def _selection_needs_native_retry(selection: dict[str, object]) -> bool:
@@ -2355,15 +1991,22 @@ def write_explainer_host_reports(
         or output_dir / "final_reel" / "reel_with_voice_kinetic_subtitles.mp4"
     )
     payload = {
-        "template": "explainer_host_reel",
+        "template": "editorial_explainer_reel",
         "topic": explainer_plan.topic,
         "primary_video_path": primary_video,
         "cover_path": str(output_dir / "final_reel" / "cover.jpg"),
         "qa_contact_sheet": str(output_dir / "qa_contact_sheet.jpg"),
         "media_sources_used": media_plan.get("media_sources_used", []),
         "external_media_used": bool(media_plan.get("external_media_used", False)),
+        "pexels_first_policy_active": bool(media_plan.get("pexels_first_policy_active", False)),
+        "ai_fallback_limited_to_unsupported_scenes": bool(media_plan.get("ai_fallback_limited_to_unsupported_scenes", False)),
+        "fictional_character_layer_removed": True,
+        "frames_exactly_reflect_final_slides": bool(
+            metadata.get("explainer_reel_render", {}).get("final_frames_match_final_slides", False)
+        )
+        if isinstance(metadata.get("explainer_reel_render", {}), dict)
+        else False,
         "attribution_file": str(output_dir / "media_attribution.json"),
-        "host_consistency_notes": metadata.get("host_consistency", {}),
         "factual_caveats": explainer_plan.caveats,
         "human_review_required": True,
         "automatic_posting_ready": False,
@@ -2371,11 +2014,11 @@ def write_explainer_host_reports(
         "explainer_quality": explainer_quality,
         "media_attribution": attribution,
     }
-    for stem in ("explainer_host_technical_report", "explainer_host_review_report"):
+    for stem in ("editorial_explainer_technical_report", "editorial_explainer_review_report"):
         (qa_dir / f"{stem}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     technical_lines = [
-        "# Explainer Host Technical Report",
+        "# Editorial Explainer Technical Report",
         "",
         f"- template: {payload['template']}",
         f"- topic: {payload['topic']}",
@@ -2383,306 +2026,78 @@ def write_explainer_host_reports(
         f"- cover_path: {payload['cover_path']}",
         f"- qa_contact_sheet: {payload['qa_contact_sheet']}",
         f"- media_sources_used: {', '.join(str(item) for item in payload['media_sources_used'])}",
+        f"- pexels_first_policy_active: {str(payload['pexels_first_policy_active']).lower()}",
+        f"- ai_fallback_limited_to_unsupported_scenes: {str(payload['ai_fallback_limited_to_unsupported_scenes']).lower()}",
+        f"- fictional_character_layer_removed: true",
+        f"- frames_exactly_reflect_final_slides: {str(payload['frames_exactly_reflect_final_slides']).lower()}",
         f"- attribution_file: {payload['attribution_file']}",
         f"- caption_sync_score: {explainer_quality.get('caption_sync_score', 0)}",
         f"- caption_layout_score: {explainer_quality.get('caption_layout_score', 0)}",
         f"- explanation_value_score: {explainer_quality.get('explanation_value_score', 0)}",
         f"- media_relevance_score: {explainer_quality.get('media_relevance_score', 0)}",
-        f"- host_consistency_score: {explainer_quality.get('host_consistency_score', 0)}",
         f"- professional_edit_score: {explainer_quality.get('professional_edit_score', 0)}",
         f"- viral_readiness_score: {explainer_quality.get('viral_readiness_score', 0)}",
         "",
         "## Notes",
         "- Human review is required. This mode does not mark content as auto-posting ready.",
     ]
-    (qa_dir / "explainer_host_technical_report.md").write_text("\n".join(technical_lines) + "\n", encoding="utf-8")
+    (qa_dir / "editorial_explainer_technical_report.md").write_text("\n".join(technical_lines) + "\n", encoding="utf-8")
     review_lines = [
-        "# Explainer Host Review Report",
+        "# Editorial Explainer Review Report",
         "",
         f"- primary video path: {payload['primary_video_path']}",
         f"- cover path: {payload['cover_path']}",
         f"- qa contact sheet: {payload['qa_contact_sheet']}",
         f"- media sources used: {', '.join(str(item) for item in payload['media_sources_used'])}",
         f"- attribution file: {payload['attribution_file']}",
-        f"- host consistency notes: {metadata.get('host_consistency', {})}",
+        f"- pexels first policy active: {str(payload['pexels_first_policy_active']).lower()}",
+        f"- frames exactly reflect final slides: {str(payload['frames_exactly_reflect_final_slides']).lower()}",
         "",
         "## Factual Caveats",
         *[f"- {caveat}" for caveat in explainer_plan.caveats],
         "",
         "## Human Review Checklist",
-        "1. Does the host feel consistent and not creepy?",
+        "1. Are all scenes free of mascots, fictional hosts, and character guides?",
         "2. Is the explanation actually useful?",
-        "3. Are stock/API images relevant and high quality?",
+        "3. Are Pexels/API images relevant and high quality?",
         "4. Are captions synced and clean?",
         "5. Does the edit feel premium?",
         "6. Is there enough visual variety?",
         "7. Is there any misleading financial claim?",
         "8. Would this be save/share-worthy?",
     ]
-    (qa_dir / "explainer_host_review_report.md").write_text("\n".join(review_lines) + "\n", encoding="utf-8")
+    (qa_dir / "editorial_explainer_review_report.md").write_text("\n".join(review_lines) + "\n", encoding="utf-8")
     write_explainer_architecture_plan(qa_dir)
-
-
-def write_mascot_story_reports(
-    output_dir: Path,
-    mascot_story_plan: MascotStoryPlan,
-    quality_report: PostQualityReport,
-    metadata: dict[str, object],
-) -> None:
-    voiceover = metadata.get("voiceover", {}) if isinstance(metadata.get("voiceover", {}), dict) else {}
-    mascot_quality = metadata.get("mascot_story_quality", {}) if isinstance(metadata.get("mascot_story_quality", {}), dict) else {}
-    media_plan = load_json_file(output_dir / "media_plan.json")
-    attribution = load_json_file(output_dir / "media_attribution.json")
-    primary_video = Path(
-        str(
-            voiceover.get("reel_with_voice_kinetic_subtitles_path")
-            or output_dir / "final_reel" / "reel_with_voice_kinetic_subtitles.mp4"
-        )
-    )
-    if not primary_video.exists():
-        primary_video = output_dir / "final_reel" / "reel.mp4"
-    summary = ffprobe_summary(primary_video)
-    video_stream = summary.get("video_stream", {}) if isinstance(summary.get("video_stream", {}), dict) else {}
-    audio_stream = summary.get("audio_stream", {}) if isinstance(summary.get("audio_stream", {}), dict) else {}
-    scene_count = len(mascot_story_plan.scenes)
-    raw_paths = [output_dir / "raw_images" / f"slide_{index:02d}.jpg" for index in range(1, scene_count + 1)]
-    external_files = [
-        str(item.get("selected", {}).get("local_path", ""))
-        for item in media_plan.get("scenes", [])
-        if isinstance(item, dict)
-        and isinstance(item.get("selected", {}), dict)
-        and item["selected"].get("provider") in {"pexels", "unsplash", "wikimedia"}
-        and item["selected"].get("local_path")
-        and Path(str(item["selected"].get("local_path"))).exists()
-    ]
-    technical = {
-        "video_exists": primary_video.exists(),
-        "video_path": str(primary_video),
-        "video_dimensions": [int(video_stream.get("width", 0) or 0), int(video_stream.get("height", 0) or 0)]
-        if video_stream
-        else media_dimensions(primary_video),
-        "fps": 30,
-        "fps_ok": True,
-        "audio_stream_exists": bool(audio_stream) or has_audio_stream(primary_video),
-        "duration_seconds": round(float(summary.get("format_duration_seconds", 0.0) or video_stream.get("duration_seconds", 0.0) or 0.0), 3),
-        "duration_ok": 22
-        <= float(summary.get("format_duration_seconds", 0.0) or video_stream.get("duration_seconds", 0.0) or 0.0)
-        <= 35,
-        "blank_scene_count": int(mascot_quality.get("blank_scene_count", 0) or 0),
-        "prompt_text_visible_count": int(mascot_quality.get("prompt_text_visible_count", 0) or 0),
-        "text_crop_count": int(mascot_quality.get("text_crop_count", 0) or 0),
-        "caption_collision_count": int(mascot_quality.get("caption_collision_count", 0) or 0),
-        "primitive_mascot_risk": mascot_quality.get("primitive_mascot_risk", "low"),
-        "placeholder_visual_risk": mascot_quality.get("placeholder_visual_risk", "low"),
-        "powerpoint_chart_risk": mascot_quality.get("powerpoint_chart_risk", "low"),
-        "caption_box_dominance_ratio": mascot_quality.get("caption_box_dominance_ratio", 0),
-        "visual_asset_quality_score": mascot_quality.get("visual_asset_quality_score", 0),
-        "broll_or_ai_scene_quality_score": mascot_quality.get("broll_or_ai_scene_quality_score", 0),
-        "mascot_scene_count": sum(1 for scene in mascot_story_plan.scenes if scene.visual_type in {"mascot_ai", "mixed"}),
-        "all_media_files_exist": all(path.exists() for path in raw_paths),
-        "external_media_files_used": external_files,
-        "external_media_used_flag_truthful": bool(media_plan.get("external_media_used", False)) == bool(external_files),
-        "no_fake_external_media_claim": bool(media_plan.get("external_media_used", False)) == bool(external_files),
-        "production_visual_minimums_passed": bool(mascot_quality.get("quality_gate_passed", False)),
-        "media_sources_used": media_plan.get("media_sources_used", []),
-        "missing_api_keys": mascot_quality.get("missing_api_keys", []),
-        "attribution_file_exists": (output_dir / "media_attribution.json").exists(),
-        "quality_report_exists": (output_dir / "mascot_story_quality_report.json").exists(),
-        "cover_path": str(output_dir / "final_reel" / "cover.jpg"),
-        "qa_contact_sheet_path": str(output_dir / "qa_contact_sheet.jpg"),
-        "visual_aesthetic_report_path": str(output_dir / "visual_aesthetic_report.json"),
-        "media_quality_report_path": str(output_dir / "media_quality_report.json"),
-        "post_quality_score": quality_report.score,
-        "attribution": attribution,
-    }
-    write_mascot_story_technical_report(output_dir, technical)
-
-
-def write_hybrid_story_reports(
-    output_dir: Path,
-    hybrid_story_plan: HybridStoryPlan,
-    quality_report: PostQualityReport,
-    metadata: dict[str, object],
-) -> None:
-    qa_dir = output_dir.parents[1] / "qa" if len(output_dir.parents) >= 2 else output_dir / "qa"
-    qa_dir.mkdir(parents=True, exist_ok=True)
-    voiceover = metadata.get("voiceover", {}) if isinstance(metadata.get("voiceover", {}), dict) else {}
-    hybrid_quality = metadata.get("hybrid_story_quality", {}) if isinstance(metadata.get("hybrid_story_quality", {}), dict) else {}
-    media_plan = load_json_file(output_dir / "media_plan.json")
-    attribution = load_json_file(output_dir / "media_attribution.json")
-    primary_video = Path(
-        str(
-            voiceover.get("reel_with_voice_kinetic_subtitles_path")
-            or output_dir / "final_reel" / "reel_with_voice_kinetic_subtitles.mp4"
-        )
-    )
-    if not primary_video.exists():
-        primary_video = output_dir / "final_reel" / "reel.mp4"
-    summary = ffprobe_summary(primary_video)
-    video_stream = summary.get("video_stream", {}) if isinstance(summary.get("video_stream", {}), dict) else {}
-    audio_stream = summary.get("audio_stream", {}) if isinstance(summary.get("audio_stream", {}), dict) else {}
-    media_scenes = media_plan.get("scenes", []) if isinstance(media_plan.get("scenes", []), list) else []
-    scene_visuals = [
-        {
-            "scene_number": scene.scene_number,
-            "role": scene.role,
-            "visual_type": scene.visual_type,
-            "mascot_presence": scene.mascot_presence,
-            "mascot_frame_share_target": scene.mascot_frame_share_target,
-            "media_source": _media_source_for_scene(media_scenes, scene.scene_number),
-            "production_ready": _media_ready_for_scene(media_scenes, scene.scene_number),
-        }
-        for scene in hybrid_story_plan.scenes
-    ]
-    technical = {
-        "video_exists": primary_video.exists(),
-        "video_path": str(primary_video),
-        "video_dimensions": [int(video_stream.get("width", 0) or 0), int(video_stream.get("height", 0) or 0)]
-        if video_stream
-        else media_dimensions(primary_video),
-        "fps": 30,
-        "fps_ok": True,
-        "audio_stream_exists": bool(audio_stream) or has_audio_stream(primary_video),
-        "duration_seconds": round(float(summary.get("format_duration_seconds", 0.0) or video_stream.get("duration_seconds", 0.0) or 0.0), 3),
-        "duration_ok": 24
-        <= float(summary.get("format_duration_seconds", 0.0) or video_stream.get("duration_seconds", 0.0) or 0.0)
-        <= 38,
-        "scenes_generated": len(hybrid_story_plan.scenes),
-        "blank_scene_count": int(hybrid_quality.get("blank_scene_count", 0) or 0),
-        "prompt_text_visible_count": int(hybrid_quality.get("prompt_text_visible_count", 0) or 0),
-        "text_crop_count": int(hybrid_quality.get("text_crop_count", 0) or 0),
-        "caption_collision_count": int(hybrid_quality.get("caption_collision_count", 0) or 0),
-        "real_world_context_scenes": int(hybrid_quality.get("real_world_context_scenes", 0) or 0),
-        "mascot_scenes": int(hybrid_quality.get("mascot_scenes", 0) or 0),
-        "mascot_dominant_scenes": int(hybrid_quality.get("mascot_dominant_scenes", 0) or 0),
-        "max_mascot_frame_share": float(hybrid_quality.get("max_mascot_frame_share", 0.0) or 0.0),
-        "questioner_or_proxy_present": bool(hybrid_quality.get("questioner_or_proxy_present", False)),
-        "infographic_quality_score": int(hybrid_quality.get("infographic_quality_score", 0) or 0),
-        "composition_quality_score": int(hybrid_quality.get("composition_quality_score", 0) or 0),
-        "visual_coherence_score": int(hybrid_quality.get("visual_coherence_score", 0) or 0),
-        "cheapness_risk_score": int(hybrid_quality.get("cheapness_risk_score", 0) or 0),
-        "production_visual_minimums_passed": bool(hybrid_quality.get("production_visual_minimums_passed", False)),
-        "media_sources_used": hybrid_quality.get("media_sources_used", []),
-        "external_media_files_used": hybrid_quality.get("external_media_files_used", []),
-        "attribution_file_exists": (output_dir / "media_attribution.json").exists(),
-        "media_decision_report_exists": (output_dir / "media_decision_report.json").exists(),
-        "hybrid_story_quality_report_exists": (output_dir / "hybrid_story_quality_report.json").exists(),
-        "cover_path": str(output_dir / "final_reel" / "cover.jpg"),
-        "qa_contact_sheet_path": str(output_dir / "qa_contact_sheet.jpg"),
-        "media_decision_report_path": str(output_dir / "media_decision_report.json"),
-        "hybrid_story_quality_report_path": str(output_dir / "hybrid_story_quality_report.json"),
-        "post_quality_score": quality_report.score,
-        "attribution": attribution,
-    }
-    technical_json = json.dumps(technical, ensure_ascii=False, indent=2)
-    (qa_dir / "hybrid_story_v1_technical_report.json").write_text(technical_json, encoding="utf-8")
-    technical_lines = ["# Hybrid Story V1 Technical Report", ""]
-    for key, value in technical.items():
-        if isinstance(value, (dict, list)):
-            value = json.dumps(value, ensure_ascii=False)
-        elif isinstance(value, bool):
-            value = str(value).lower()
-        technical_lines.append(f"- {key}: {value}")
-    (qa_dir / "hybrid_story_v1_technical_report.md").write_text("\n".join(technical_lines) + "\n", encoding="utf-8")
-
-    review = {
-        "primary_video_path": str(primary_video),
-        "cover_path": str(output_dir / "final_reel" / "cover.jpg"),
-        "qa_contact_sheet_path": str(output_dir / "qa_contact_sheet.jpg"),
-        "media_sources_used": hybrid_quality.get("media_sources_used", []),
-        "external_files_used": hybrid_quality.get("external_media_files_used", []),
-        "scene_by_scene_visual_type": scene_visuals,
-        "mascot_frame_share_estimates": {
-            f"scene_{scene.scene_number:02d}": scene.mascot_frame_share_target
-            for scene in hybrid_story_plan.scenes
-            if scene.mascot_presence != "none"
-        },
-        "scenes_where_mascot_appears": [scene.scene_number for scene in hybrid_story_plan.scenes if scene.mascot_presence != "none"],
-        "real_world_context_scenes_count": int(hybrid_quality.get("real_world_context_scenes", 0) or 0),
-        "questioner_or_proxy_scene": next((scene.scene_number for scene in hybrid_story_plan.scenes if scene.proxy_role_optional != "none" or scene.questioner_line_optional), 0),
-        "biggest_remaining_warnings": hybrid_quality.get("warnings", []),
-        "human_review_required": True,
-        "automatic_posting_ready": False,
-        "human_checklist": [
-            "Does Miko feel like a guide, not the whole content?",
-            "Are scenes actually related to oil/dollar?",
-            "Is there a concrete story/example?",
-            "Are there any cheap title cards?",
-            "Are captions too dominant?",
-            "Does it feel like a premium Reel, not slides?",
-            "Is the explanation useful?",
-            "Would you save/share this?",
-            "Would you follow for more?",
-        ],
-    }
-    review_json = json.dumps(review, ensure_ascii=False, indent=2)
-    (qa_dir / "hybrid_story_v1_review_report.json").write_text(review_json, encoding="utf-8")
-    review_lines = [
-        "# Hybrid Story V1 Review Report",
-        "",
-        f"- primary video path: {review['primary_video_path']}",
-        f"- cover path: {review['cover_path']}",
-        f"- qa contact sheet path: {review['qa_contact_sheet_path']}",
-        f"- media sources used: {', '.join(str(item) for item in review['media_sources_used'])}",
-        f"- external files used: {', '.join(str(item) for item in review['external_files_used']) or 'none'}",
-        f"- real-world context scenes: {review['real_world_context_scenes_count']}",
-        f"- questioner/proxy scene: {review['questioner_or_proxy_scene']}",
-        "",
-        "## Scene Visuals",
-    ]
-    for item in scene_visuals:
-        review_lines.append(
-            f"- scene {item['scene_number']}: {item['role']} / {item['visual_type']} / mascot={item['mascot_presence']} / source={item['media_source']}"
-        )
-    review_lines.extend(["", "## Biggest Remaining Warnings"])
-    warnings = review.get("biggest_remaining_warnings", [])
-    review_lines.extend(f"- {item}" for item in warnings) if warnings else review_lines.append("- None")
-    review_lines.extend(["", "## Human Checklist"])
-    review_lines.extend(f"{index}. {item}" for index, item in enumerate(review["human_checklist"], start=1))
-    (qa_dir / "hybrid_story_v1_review_report.md").write_text("\n".join(review_lines) + "\n", encoding="utf-8")
-
-
-def _media_source_for_scene(media_scenes: list[object], scene_number: int) -> str:
-    for item in media_scenes:
-        if isinstance(item, dict) and int(item.get("scene_number", 0) or 0) == scene_number:
-            return str(item.get("chosen_source", ""))
-    return ""
-
-
-def _media_ready_for_scene(media_scenes: list[object], scene_number: int) -> bool:
-    for item in media_scenes:
-        if isinstance(item, dict) and int(item.get("scene_number", 0) or 0) == scene_number:
-            return bool(item.get("production_ready", False))
-    return False
 
 
 def write_explainer_architecture_plan(qa_dir: Path) -> None:
     architecture = {
-        "template": "explainer_host_reel",
-        "host_character_profile": "data/hosts/nova.json",
+        "template": "editorial_explainer_reel",
+        "fictional_character_layer": "removed",
         "script_planner": "app/content/explainer_planner.py",
         "media_sourcing_layer": "app/media",
         "media_selection_ranking": "app/media/media_ranker.py",
         "rendering_editing": "app/render/explainer_host_reel_renderer.py",
         "quality_gate": "app/quality/explainer_quality.py",
-        "limitations": "Host identity consistency uses repeated visual prompts and reference assets, not guaranteed face locking.",
+        "single_source_of_truth": "final_slides are copied to QA frames and encoded into the Reel timeline",
+        "limitations": "Pexels availability depends on API access and candidate quality; AI is fallback-only.",
     }
-    (qa_dir / "explainer_host_architecture_plan.json").write_text(
+    (qa_dir / "editorial_explainer_architecture_plan.json").write_text(
         json.dumps(architecture, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (qa_dir / "explainer_host_architecture_plan.md").write_text(
+    (qa_dir / "editorial_explainer_architecture_plan.md").write_text(
         "\n".join(
             [
-                "# Explainer Host Architecture Plan",
+                "# Editorial Explainer Architecture Plan",
                 "",
-                "- host character profile: data/hosts/nova.json",
+                "- fictional character layer: removed",
                 "- explainer script plan: app/content/explainer_planner.py and app/content/explainer_schemas.py",
-                "- media sourcing layer: app/media providers for AI, Pexels, Unsplash, and Wikimedia",
-                "- media selection/ranking: relevance, vertical usability, license safety, clarity, and source trust",
-                "- rendering/editing: app/render/explainer_host_reel_renderer.py with existing kinetic captions",
+                "- media sourcing layer: Pexels-first, premium infographic second, AI fallback only",
+                "- media selection/ranking: relevance, realism, clarity, vertical crop, license safety, and source trust",
+                "- rendering/editing: final slide composition is the source for frames and video",
                 "- quality gate: app/quality/explainer_quality.py",
-                "- limitation: exact host face consistency is not guaranteed in the MVP.",
+                "- limitation: Pexels availability depends on API access and search quality.",
             ]
         )
         + "\n",
@@ -2730,19 +2145,14 @@ def media_health(args: argparse.Namespace) -> int:
     load_config()
     missing = missing_media_api_keys()
     pexels_configured = bool(os.getenv("PEXELS_API_KEY"))
-    unsplash_configured = bool(os.getenv("UNSPLASH_ACCESS_KEY"))
     payload = {
-        "media_health_passed": pexels_configured or unsplash_configured,
+        "media_health_passed": pexels_configured,
         "pexels_configured": pexels_configured,
-        "unsplash_configured": unsplash_configured,
-        "wikimedia_configured": True,
         "missing_media_keys": missing,
         "secrets_printed": False,
     }
     print(f"media_health_passed: {str(payload['media_health_passed']).lower()}")
     print(f"pexels_configured: {str(pexels_configured).lower()}")
-    print(f"unsplash_configured: {str(unsplash_configured).lower()}")
-    print("wikimedia_configured: true")
     if missing:
         print("missing_media_keys: " + ", ".join(missing))
     else:
@@ -2844,7 +2254,8 @@ def build_overlay_region_metadata(
     for slide in plan.slides:
         slide_key = f"slide_{slide.slide_number:02d}"
         template = render_template_used_per_slide.get(slide_key, "")
-        regions[slide_key] = get_expected_overlay_regions(slide, template)
+        output_size = (1080, 1920) if template.startswith("editorial_explainer_reel") else (1080, 1350)
+        regions[slide_key] = get_expected_overlay_regions(slide, template, output_size=output_size)
     return regions
 
 

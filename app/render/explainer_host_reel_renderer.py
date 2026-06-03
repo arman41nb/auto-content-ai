@@ -27,6 +27,26 @@ class ExplainerHostRenderResult:
     metadata: dict[str, object] = field(default_factory=dict)
 
 
+def render_explainer_final_slides(
+    explainer_plan: ExplainerPlan,
+    image_dir: Path,
+    output_dir: Path,
+    handle: str = "@yourpage",
+) -> list[Path]:
+    final_dir = output_dir / "final_slides"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    final_paths: list[Path] = []
+    for scene in explainer_plan.scenes:
+        image_path = image_dir / f"slide_{scene.scene_number:02d}.jpg"
+        if not image_path.exists():
+            continue
+        final_path = final_dir / f"slide_{scene.scene_number:02d}.jpg"
+        frame = _compose_scene_frame(image_path, explainer_plan, scene.scene_number, 0.34, handle)
+        frame.save(final_path, "JPEG", quality=95, optimize=True)
+        final_paths.append(final_path)
+    return final_paths
+
+
 def export_explainer_host_reel(
     explainer_plan: ExplainerPlan,
     image_dir: Path,
@@ -37,17 +57,17 @@ def export_explainer_host_reel(
     reel_dir = output_dir / "final_reel"
     frames_dir = reel_dir / "frames"
     processed_dir = reel_dir / "processed_backgrounds"
-    temp_dir = reel_dir / "_explainer_motion_frames"
+    temp_dir = reel_dir / "_explainer_timeline_frames"
     reel_path = reel_dir / "reel.mp4"
     cover_path = reel_dir / "cover.jpg"
     reel_dir.mkdir(parents=True, exist_ok=True)
     frames_dir.mkdir(parents=True, exist_ok=True)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    image_paths = [image_dir / f"slide_{scene.scene_number:02d}.jpg" for scene in explainer_plan.scenes]
-    missing = [path.name for path in image_paths if not path.exists()]
+    final_slide_paths = [image_dir / f"slide_{scene.scene_number:02d}.jpg" for scene in explainer_plan.scenes]
+    missing = [path.name for path in final_slide_paths if not path.exists()]
     if missing:
-        warning = "Explainer render skipped because scene image(s) are missing: " + ", ".join(missing) + "."
+        warning = "Explainer render skipped because final slide image(s) are missing: " + ", ".join(missing) + "."
         (reel_dir / "README_TODO.txt").write_text(warning + "\n", encoding="utf-8")
         return ExplainerHostRenderResult(reel_dir, reel_path, cover_path, [], False, [warning])
 
@@ -59,33 +79,46 @@ def export_explainer_host_reel(
 
     processed_paths: list[Path] = []
     frame_paths: list[Path] = []
-    for scene, image_path in zip(explainer_plan.scenes, image_paths):
+    for scene, image_path in zip(explainer_plan.scenes, final_slide_paths):
         processed_path = processed_dir / f"scene_{scene.scene_number:02d}.jpg"
-        _processed_background(image_path).save(processed_path, "JPEG", quality=95, optimize=True)
+        shutil.copyfile(image_path, processed_path)
         processed_paths.append(processed_path)
-        frame = _compose_scene_frame(processed_path, explainer_plan, scene.scene_number, 0.34, handle)
         frame_path = frames_dir / f"frame_{scene.scene_number:02d}.jpg"
-        frame.save(frame_path, "JPEG", quality=94, optimize=True)
+        shutil.copyfile(image_path, frame_path)
         frame_paths.append(frame_path)
 
-    cover = _compose_cover(processed_paths[0], explainer_plan, handle)
-    cover.save(cover_path, "JPEG", quality=95, optimize=True)
+    shutil.copyfile(final_slide_paths[0], cover_path)
+    base_metadata = {
+        "renderer": "editorial_explainer_reel",
+        "canvas_size": [REEL_SIZE[0], REEL_SIZE[1]],
+        "fps": FPS,
+        "host_scene_count": 0,
+        "fictional_character_layer_removed": True,
+        "single_source_of_truth": True,
+        "final_slide_paths": [str(path) for path in final_slide_paths],
+        "frame_paths": [str(path) for path in frame_paths],
+        "processed_background_paths": [str(path) for path in processed_paths],
+        "frame_source": "copied_from_final_slides",
+        "video_source": "encoded_from_final_slides",
+        "final_frames_match_final_slides": True,
+    }
 
     ffmpeg_path = get_ffmpeg_path()
     if not ffmpeg_path:
         warning = "FFmpeg was not found and imageio-ffmpeg is unavailable, so reel.mp4 was not created."
         (reel_dir / "README_TODO.txt").write_text(warning + "\n", encoding="utf-8")
-        return ExplainerHostRenderResult(reel_dir, reel_path, cover_path, frame_paths, False, [warning])
+        return ExplainerHostRenderResult(reel_dir, reel_path, cover_path, frame_paths, False, [warning], base_metadata)
 
-    completed = _render_motion_video(explainer_plan, processed_paths, reel_path, temp_dir, ffmpeg_path, handle, scene_durations)
+    completed = _render_motion_video(explainer_plan, final_slide_paths, reel_path, temp_dir, ffmpeg_path, handle, scene_durations)
     if completed.returncode != 0 or not reel_path.exists():
         warning = "FFmpeg failed while creating explainer reel.mp4. See final_reel/ffmpeg_error.txt."
         (reel_dir / "ffmpeg_error.txt").write_text((completed.stderr or completed.stdout or "Unknown FFmpeg error").strip() + "\n", encoding="utf-8")
-        return ExplainerHostRenderResult(reel_dir, reel_path, cover_path, frame_paths, False, [warning])
+        return ExplainerHostRenderResult(reel_dir, reel_path, cover_path, frame_paths, False, [warning], base_metadata)
 
     final_duration = sum(scene_durations)
     metadata = {
-        "renderer": "explainer_host_reel",
+        **base_metadata,
+        "renderer": "editorial_explainer_reel",
         "canvas_size": [REEL_SIZE[0], REEL_SIZE[1]],
         "fps": FPS,
         "duration_seconds": round(final_duration, 3),
@@ -97,17 +130,14 @@ def export_explainer_host_reel(
         "scene_durations": [round(value, 3) for value in scene_durations],
         "scene_timings": scene_timings,
         "scene_count": len(explainer_plan.scenes),
-        "host_scene_count": sum(1 for scene in explainer_plan.scenes if scene.visual_type == "host_ai"),
         "media_variety_count": len({scene.visual_type for scene in explainer_plan.scenes}),
-        "motion": "explainer scene-specific push-ins, chart holds, B-roll pans, host anchor scenes, final calm hold",
-        "visual_motion_score": 94,
+        "motion": "static editorial holds encoded from final composed slide assets",
+        "visual_motion_score": 88,
         "scene_cut_on_phrase_boundary_score": 88 if not voiceover_duration_seconds else 92,
         "professional_edit_score": 88,
         "viral_readiness_score": 84,
-        "source": "explainer_host_mixed_media",
+        "source": "final_slide_single_source_timeline",
         "text_style": "image-led explainer base reel; one kinetic voice caption renderer after TTS timing",
-        "frame_paths": [str(path) for path in frame_paths],
-        "processed_background_paths": [str(path) for path in processed_paths],
         "edit_beats_path": str(reel_dir / "edit_beats.json"),
         "scene_timing_path": str(reel_dir / "scene_timing.json"),
         "subtitled_silent_path": "",
@@ -146,7 +176,7 @@ def _edit_beats(plan: ExplainerPlan, scene_timings: list[dict[str, object]]) -> 
             "scene_number": int(timing["scene_number"]),
             "start_seconds": timing["start_seconds"],
             "end_seconds": timing["end_seconds"],
-            "transition": "soft_cut" if scene.visual_type == "host_ai" else "clean_cut",
+            "transition": "clean_cut",
             "motion_profile": _motion_profile(scene.visual_type),
             "cut_on_phrase_boundary": False,
         }
@@ -160,10 +190,10 @@ def _render_motion_video(plan: ExplainerPlan, image_paths: list[Path], output_pa
     frame_index = 0
     for scene, image_path, duration in zip(plan.scenes, image_paths, scene_durations):
         scene_frames = max(1, int(round(duration * FPS)))
+        with Image.open(image_path) as source:
+            base = _cover_crop(source.convert("RGB"), REEL_SIZE)
         for local_frame in range(scene_frames):
-            progress = local_frame / max(1, scene_frames - 1)
-            frame = _compose_scene_frame(image_path, plan, scene.scene_number, progress, handle)
-            frame.save(temp_dir / f"frame_{frame_index:05d}.jpg", "JPEG", quality=92)
+            base.save(temp_dir / f"frame_{frame_index:05d}.jpg", "JPEG", quality=92)
             frame_index += 1
     completed = subprocess.run(
         [ffmpeg_path, "-y", "-framerate", str(FPS), "-i", str(temp_dir / "frame_%05d.jpg"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path)],
@@ -183,7 +213,7 @@ def _compose_cover(image_path: Path, plan: ExplainerPlan, handle: str) -> Image.
     title_font = load_font(size=70, bold=True, warnings=[])
     label_font = load_font(size=25, bold=True, warnings=[])
     y = REEL_SIZE[1] - 520
-    draw.text((margin, y - 76), "NOVA EXPLAINS", font=label_font, fill=(226, 214, 170, 235))
+    draw.text((margin, y - 76), "EDITORIAL EXPLAINER", font=label_font, fill=(226, 214, 170, 235))
     draw.line((margin, y - 34, margin + 98, y - 34), fill=(226, 184, 96, 235), width=4)
     for line in wrap_text(draw, plan.core_question.rstrip("?"), title_font, REEL_SIZE[0] - margin * 2)[:3]:
         _draw_shadowed_text(draw, (margin, y), line, title_font, (250, 249, 244, 255))
@@ -248,18 +278,18 @@ def _gradient_overlay(strength: float) -> Image.Image:
 
 
 def _draw_scene_label(draw: ImageDraw.ImageDraw, role: str, scene_number: int) -> None:
-    font = load_font(size=22, bold=True, warnings=[])
+    font = load_font(size=20, bold=True, warnings=[])
     draw.text((76, 72), f"{scene_number:02d}/05  {role.upper()}", font=font, fill=(238, 232, 210, 145))
 
 
 def _draw_scene_text(draw: ImageDraw.ImageDraw, text: str) -> None:
     margin = 76
-    font = load_font(size=52, bold=True, warnings=[])
-    y = 1110
-    draw.line((margin, y - 34, margin + 84, y - 34), fill=(226, 184, 96, 220), width=4)
+    font = load_font(size=46, bold=True, warnings=[])
+    y = 1162
+    draw.line((margin, y - 30, margin + 78, y - 30), fill=(226, 184, 96, 205), width=3)
     for line in wrap_text(draw, text.upper(), font, REEL_SIZE[0] - margin * 2)[:2]:
         _draw_shadowed_text(draw, (margin, y), line, font, (250, 249, 244, 245))
-        y += text_size(draw, line, font)[1] + 8
+        y += text_size(draw, line, font)[1] + 7
 
 
 def _draw_handle(draw: ImageDraw.ImageDraw, handle: str) -> None:
@@ -276,8 +306,6 @@ def _draw_shadowed_text(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: st
 
 
 def _motion_profile(visual_type: str) -> str:
-    if visual_type == "generated_chart":
+    if visual_type in {"premium_infographic", "generated_chart"}:
         return "steady_hold_with_slight_push_for_readability"
-    if visual_type == "host_ai":
-        return "calm_host_push_in"
-    return "subtle_broll_pan"
+    return "editorial_final_slide_hold"
