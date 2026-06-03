@@ -18,6 +18,7 @@ def run_explainer_quality_gate(output_dir: Path, plan: ExplainerPlan, metadata: 
     attribution = _read_json(output_dir / "media_attribution.json")
     voiceover = metadata.get("voiceover", {}) if isinstance(metadata.get("voiceover", {}), dict) else {}
     render = metadata.get("explainer_reel_render", {}) if isinstance(metadata.get("explainer_reel_render", {}), dict) else {}
+    editorial_motion_quality = _editorial_motion_quality(metadata)
 
     hook_clarity_score = 92 if "?" in plan.core_question or any(word in plan.hook.lower() for word in ("connected", "simple", "why")) else 76
     explanation_value_score = 94 if plan.simple_answer and len(plan.caveats) >= 2 else 72
@@ -31,6 +32,11 @@ def run_explainer_quality_gate(output_dir: Path, plan: ExplainerPlan, metadata: 
     financial_advice_risk = "low" if _has_financial_caveat(plan) else "high"
     source_attribution_score = _source_attribution_score(attribution)
     professional_edit_score = int(render.get("professional_edit_score", 88) or 88)
+    if editorial_motion_quality:
+        professional_edit_score = min(
+            professional_edit_score,
+            int(editorial_motion_quality.get("editorial_motion_score", professional_edit_score) or professional_edit_score),
+        )
     character_layer_violations = _character_layer_violations(plan, media_plan)
     primitive_scene_numbers = _primitive_scene_numbers(media_plan)
     fake_text_risk_scene_numbers = _fake_text_risk_scene_numbers(media_plan)
@@ -78,6 +84,10 @@ def run_explainer_quality_gate(output_dir: Path, plan: ExplainerPlan, metadata: 
         blockers.append(f"factual_safety_score is below 80: {factual_safety_score}.")
     if professional_edit_score < 80:
         blockers.append(f"professional_edit_score is below 80: {professional_edit_score}.")
+    if editorial_motion_quality and not bool(editorial_motion_quality.get("quality_gate_passed", False)):
+        blockers.append("editorial_motion_quality gate failed.")
+    if editorial_motion_quality and str(editorial_motion_quality.get("slideshow_motion_risk", "low")) == "high":
+        blockers.append("editorial slideshow motion risk is high.")
     if viral_readiness_score < 75:
         blockers.append(f"viral_readiness_score is below 75: {viral_readiness_score}.")
     if voiceover_requested and caption_sync_score < 80:
@@ -108,6 +118,14 @@ def run_explainer_quality_gate(output_dir: Path, plan: ExplainerPlan, metadata: 
         "financial_advice_risk": financial_advice_risk,
         "source_attribution_score": source_attribution_score,
         "professional_edit_score": professional_edit_score,
+        "editorial_motion_quality": editorial_motion_quality,
+        "editorial_motion_score": editorial_motion_quality.get("editorial_motion_score", 0),
+        "obvious_zoom_count": editorial_motion_quality.get("obvious_zoom_count", 0),
+        "max_still_scale_delta": editorial_motion_quality.get("max_still_scale_delta", 0),
+        "average_still_scale_delta": editorial_motion_quality.get("average_still_scale_delta", 0),
+        "repeated_motion_pattern_count": editorial_motion_quality.get("repeated_motion_pattern_count", 0),
+        "slideshow_motion_risk": editorial_motion_quality.get("slideshow_motion_risk", ""),
+        "transition_variety_score": editorial_motion_quality.get("transition_variety_score", 0),
         "viral_readiness_score": viral_readiness_score,
         "character_layer_violations": character_layer_violations,
         "fictional_character_layer_removed": not character_layer_violations,
@@ -150,6 +168,12 @@ def write_explainer_quality_report(output_dir: Path, report: dict[str, Any]) -> 
         f"- financial_advice_risk: {report['financial_advice_risk']}",
         f"- source_attribution_score: {report['source_attribution_score']}",
         f"- professional_edit_score: {report['professional_edit_score']}",
+        f"- editorial_motion_score: {report.get('editorial_motion_score', 0)}",
+        f"- obvious_zoom_count: {report.get('obvious_zoom_count', 0)}",
+        f"- max_still_scale_delta: {report.get('max_still_scale_delta', 0)}",
+        f"- average_still_scale_delta: {report.get('average_still_scale_delta', 0)}",
+        f"- repeated_motion_pattern_count: {report.get('repeated_motion_pattern_count', 0)}",
+        f"- slideshow_motion_risk: {report.get('slideshow_motion_risk', '')}",
         f"- viral_readiness_score: {report['viral_readiness_score']}",
         "",
         "## Blocking Issues",
@@ -315,6 +339,18 @@ def _read_json(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _editorial_motion_quality(metadata: dict[str, Any]) -> dict[str, Any]:
+    direct = metadata.get("editorial_motion_quality", {})
+    if isinstance(direct, dict) and direct:
+        return direct
+    render = metadata.get("explainer_reel_render", {})
+    if isinstance(render, dict):
+        nested = render.get("editorial_motion_quality", {})
+        if isinstance(nested, dict):
+            return nested
+    return {}
 
 
 def _image_is_size(path: Path, expected: tuple[int, int]) -> bool:

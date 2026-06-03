@@ -40,12 +40,18 @@ from app.image.sanitizer import preferred_image_dir, sanitize_post_images
 from app.llm.provider_factory import build_llm_providers
 from app.quality.candidate_scorer import score_candidate_folder
 from app.quality.contact_sheet import create_batch_contact_sheet, create_qa_contact_sheet
+from app.quality.editorial_motion_quality import run_editorial_motion_quality
 from app.quality.explainer_quality import run_explainer_quality_gate
 from app.quality.native_reel_quality import run_native_reel_quality_gate
 from app.quality.overlay_masks import get_expected_overlay_regions
 from app.quality.post_quality_gate import PostQualityReport, run_post_quality_gate
 from app.render.carousel_renderer import CarouselRenderer
 from app.render.explainer_host_reel_renderer import export_explainer_host_reel, render_explainer_final_slides
+from app.render.editorial_motion_planner import (
+    edit_beats_from_motion_plan,
+    plan_editorial_motion,
+    save_editorial_motion_plan,
+)
 from app.render.kinetic_captions import (
     build_caption_timing_from_srt,
     caption_quality_metrics,
@@ -709,6 +715,12 @@ def generate(args: argparse.Namespace) -> int:
             render_template_used_per_slide=render_template_used_per_slide,
         )
         exporter.save_metadata(output_dir, metadata)
+        if explainer_host_mode:
+            editorial_motion_quality = run_editorial_motion_quality(output_dir)
+            metadata["editorial_motion_quality"] = editorial_motion_quality
+            if isinstance(metadata.get("explainer_reel_render", {}), dict):
+                metadata["explainer_reel_render"]["editorial_motion_quality"] = editorial_motion_quality  # type: ignore[index]
+            exporter.save_metadata(output_dir, metadata)
         if native_reel_mode and reel_plan is not None:
             native_reel_quality = run_native_reel_quality_gate(
                 output_dir=output_dir,
@@ -949,6 +961,12 @@ def generate(args: argparse.Namespace) -> int:
         }
     )
     exporter.save_metadata(output_dir, metadata)
+    if explainer_host_mode:
+        editorial_motion_quality = run_editorial_motion_quality(output_dir)
+        metadata["editorial_motion_quality"] = editorial_motion_quality
+        if isinstance(metadata.get("explainer_reel_render", {}), dict):
+            metadata["explainer_reel_render"]["editorial_motion_quality"] = editorial_motion_quality  # type: ignore[index]
+        exporter.save_metadata(output_dir, metadata)
     if native_reel_mode and reel_plan is not None:
         native_reel_quality = run_native_reel_quality_gate(
             output_dir=output_dir,
@@ -1109,17 +1127,46 @@ def write_voiceover_assets(
         sync_render_scene_timing_metadata(render_metadata, timing_info.get("scene_timings", []))
         render_metadata["scene_timing_strategy"] = "edge_tts_phrase_boundaries"
         render_metadata["scene_cut_on_phrase_boundary_score"] = 94 if caption_segments else 50
-        render_metadata["visual_motion_score"] = 94
-        render_metadata["professional_edit_score"] = 90
-        render_metadata["viral_readiness_score"] = 88
+        editorial_motion_plan: dict[str, object] = {}
+        editorial_motion_quality: dict[str, object] = {}
+        explainer_plan = getattr(args, "explainer_plan", None)
+        if explainer_plan is not None:
+            media_plan_info = getattr(args, "media_plan_info", {})
+            if not isinstance(media_plan_info, dict):
+                media_plan_info = load_json_file(output_dir / "media_plan.json")
+            editorial_motion_plan = plan_editorial_motion(
+                explainer_plan=explainer_plan,
+                media_plan=media_plan_info,
+                scene_timings=timing_info.get("scene_timings", []),
+                caption_segments=caption_segments,
+            )
+            motion_plan_path = save_editorial_motion_plan(output_dir, editorial_motion_plan)
+            editorial_motion_quality = run_editorial_motion_quality(output_dir, editorial_motion_plan)
+            render_metadata["editorial_motion_plan"] = editorial_motion_plan
+            render_metadata["editorial_motion_plan_path"] = str(motion_plan_path)
+            render_metadata["editorial_motion_quality"] = editorial_motion_quality
+            info["editorial_motion_plan_path"] = str(motion_plan_path)
+            info["editorial_motion_quality"] = editorial_motion_quality
+            render_metadata["video_clips_used_count"] = editorial_motion_plan.get("video_clips_used_count", 0)
+            render_metadata["photo_scenes_count"] = editorial_motion_plan.get("photo_scenes_count", 0)
+            render_metadata["artificial_motion_scenes_count"] = editorial_motion_plan.get("artificial_motion_scenes_count", 0)
+        motion_score = int(editorial_motion_quality.get("editorial_motion_score", 94) or 94)
+        render_metadata["visual_motion_score"] = motion_score
+        render_metadata["professional_edit_score"] = min(90, motion_score)
+        render_metadata["viral_readiness_score"] = min(88, max(75, motion_score))
         reel_dir = output_dir / "final_reel"
         reel_dir.mkdir(parents=True, exist_ok=True)
         (reel_dir / "scene_timing.json").write_text(
             json.dumps(timing_info.get("scene_timings", []), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        edit_beats = (
+            edit_beats_from_motion_plan(editorial_motion_plan, timing_info.get("scene_timings", []), caption_segments)
+            if editorial_motion_plan
+            else timing_info.get("edit_beats", [])
+        )
         (reel_dir / "edit_beats.json").write_text(
-            json.dumps(timing_info.get("edit_beats", []), ensure_ascii=False, indent=2),
+            json.dumps(edit_beats, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     ffmpeg = get_ffmpeg_path()
@@ -1182,6 +1229,9 @@ def write_voiceover_assets(
                 scene_timings=scene_timings_for_kinetic,
                 total_duration_seconds=total_duration,
                 caption_style=requested_caption_style,
+                motion_plan=render_metadata.get("editorial_motion_plan")
+                if isinstance(render_metadata.get("editorial_motion_plan"), dict)
+                else None,
             )
             info["kinetic_subtitle_silent_path"] = kinetic_result.get("path", "")
             info["kinetic_subtitles_created"] = bool(kinetic_result.get("created", False))
@@ -1984,11 +2034,15 @@ def write_explainer_host_reports(
     qa_dir.mkdir(parents=True, exist_ok=True)
     voiceover = metadata.get("voiceover", {}) if isinstance(metadata.get("voiceover", {}), dict) else {}
     explainer_quality = metadata.get("explainer_quality", {}) if isinstance(metadata.get("explainer_quality", {}), dict) else {}
+    editorial_motion_quality = metadata.get("editorial_motion_quality", {}) if isinstance(metadata.get("editorial_motion_quality", {}), dict) else {}
+    explainer_render = metadata.get("explainer_reel_render", {}) if isinstance(metadata.get("explainer_reel_render", {}), dict) else {}
     media_plan = load_json_file(output_dir / "media_plan.json")
     attribution = load_json_file(output_dir / "media_attribution.json")
     primary_video = str(
         voiceover.get("reel_with_voice_kinetic_subtitles_path")
-        or output_dir / "final_reel" / "reel_with_voice_kinetic_subtitles.mp4"
+        or voiceover.get("reel_with_voice_subtitled_path")
+        or voiceover.get("reel_with_voice_path")
+        or output_dir / "final_reel" / "reel.mp4"
     )
     payload = {
         "template": "editorial_explainer_reel",
@@ -1996,6 +2050,24 @@ def write_explainer_host_reports(
         "primary_video_path": primary_video,
         "cover_path": str(output_dir / "final_reel" / "cover.jpg"),
         "qa_contact_sheet": str(output_dir / "qa_contact_sheet.jpg"),
+        "editorial_motion_plan_path": str(
+            explainer_render.get("editorial_motion_plan_path")
+            or voiceover.get("editorial_motion_plan_path")
+            or output_dir / "editorial_motion_plan.json"
+        ),
+        "obvious_zoom_count": int(editorial_motion_quality.get("obvious_zoom_count", 0) or 0),
+        "max_scale_delta": editorial_motion_quality.get("max_scale_delta", 0),
+        "max_still_scale_delta": editorial_motion_quality.get("max_still_scale_delta", 0),
+        "average_still_scale_delta": editorial_motion_quality.get("average_still_scale_delta", 0),
+        "repeated_motion_pattern_count": int(editorial_motion_quality.get("repeated_motion_pattern_count", 0) or 0),
+        "slideshow_motion_risk": str(editorial_motion_quality.get("slideshow_motion_risk", "")),
+        "transition_variety_score": int(editorial_motion_quality.get("transition_variety_score", 0) or 0),
+        "video_clips_used_count": int(editorial_motion_quality.get("video_clips_used_count", 0) or 0),
+        "artificial_motion_scenes_count": int(editorial_motion_quality.get("artificial_motion_scenes_count", 0) or 0),
+        "scenes_with_artificial_motion": editorial_motion_quality.get("artificial_motion_scene_numbers", []),
+        "editorial_motion_score": int(editorial_motion_quality.get("editorial_motion_score", 0) or 0),
+        "remaining_warnings": editorial_motion_quality.get("warnings", []),
+        "exact_command_to_open_video": f'Start-Process -FilePath "{primary_video}"',
         "media_sources_used": media_plan.get("media_sources_used", []),
         "external_media_used": bool(media_plan.get("external_media_used", False)),
         "pexels_first_policy_active": bool(media_plan.get("pexels_first_policy_active", False)),
@@ -2012,9 +2084,12 @@ def write_explainer_host_reports(
         "automatic_posting_ready": False,
         "post_quality_score": quality_report.score,
         "explainer_quality": explainer_quality,
+        "editorial_motion_quality": editorial_motion_quality,
         "media_attribution": attribution,
     }
     for stem in ("editorial_explainer_technical_report", "editorial_explainer_review_report"):
+        (qa_dir / f"{stem}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    for stem in ("editorial_motion_technical_report", "editorial_motion_review_report"):
         (qa_dir / f"{stem}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     technical_lines = [
@@ -2025,6 +2100,16 @@ def write_explainer_host_reports(
         f"- primary_video_path: {payload['primary_video_path']}",
         f"- cover_path: {payload['cover_path']}",
         f"- qa_contact_sheet: {payload['qa_contact_sheet']}",
+        f"- editorial_motion_plan_path: {payload['editorial_motion_plan_path']}",
+        f"- obvious_zoom_count: {payload['obvious_zoom_count']}",
+        f"- max_still_scale_delta: {payload['max_still_scale_delta']}",
+        f"- average_still_scale_delta: {payload['average_still_scale_delta']}",
+        f"- repeated_motion_pattern_count: {payload['repeated_motion_pattern_count']}",
+        f"- slideshow_motion_risk: {payload['slideshow_motion_risk']}",
+        f"- transition_variety_score: {payload['transition_variety_score']}",
+        f"- video_clips_used_count: {payload['video_clips_used_count']}",
+        f"- artificial_motion_scenes_count: {payload['artificial_motion_scenes_count']}",
+        f"- editorial_motion_score: {payload['editorial_motion_score']}",
         f"- media_sources_used: {', '.join(str(item) for item in payload['media_sources_used'])}",
         f"- pexels_first_policy_active: {str(payload['pexels_first_policy_active']).lower()}",
         f"- ai_fallback_limited_to_unsupported_scenes: {str(payload['ai_fallback_limited_to_unsupported_scenes']).lower()}",
@@ -2037,17 +2122,27 @@ def write_explainer_host_reports(
         f"- media_relevance_score: {explainer_quality.get('media_relevance_score', 0)}",
         f"- professional_edit_score: {explainer_quality.get('professional_edit_score', 0)}",
         f"- viral_readiness_score: {explainer_quality.get('viral_readiness_score', 0)}",
+        f"- exact_command_to_open_video: {payload['exact_command_to_open_video']}",
         "",
         "## Notes",
         "- Human review is required. This mode does not mark content as auto-posting ready.",
     ]
     (qa_dir / "editorial_explainer_technical_report.md").write_text("\n".join(technical_lines) + "\n", encoding="utf-8")
+    (qa_dir / "editorial_motion_technical_report.md").write_text("\n".join(technical_lines) + "\n", encoding="utf-8")
     review_lines = [
         "# Editorial Explainer Review Report",
         "",
         f"- primary video path: {payload['primary_video_path']}",
         f"- cover path: {payload['cover_path']}",
         f"- qa contact sheet: {payload['qa_contact_sheet']}",
+        f"- editorial motion plan path: {payload['editorial_motion_plan_path']}",
+        f"- obvious zoom count: {payload['obvious_zoom_count']}",
+        f"- max scale delta: {payload['max_scale_delta']}",
+        f"- max still scale delta: {payload['max_still_scale_delta']}",
+        f"- scenes with artificial motion: {', '.join(str(item) for item in payload['scenes_with_artificial_motion'])}",
+        f"- video clips used count: {payload['video_clips_used_count']}",
+        f"- remaining warnings: {', '.join(str(item) for item in payload['remaining_warnings']) if isinstance(payload['remaining_warnings'], list) and payload['remaining_warnings'] else 'None'}",
+        f"- exact command to open video: {payload['exact_command_to_open_video']}",
         f"- media sources used: {', '.join(str(item) for item in payload['media_sources_used'])}",
         f"- attribution file: {payload['attribution_file']}",
         f"- pexels first policy active: {str(payload['pexels_first_policy_active']).lower()}",
@@ -2067,6 +2162,7 @@ def write_explainer_host_reports(
         "8. Would this be save/share-worthy?",
     ]
     (qa_dir / "editorial_explainer_review_report.md").write_text("\n".join(review_lines) + "\n", encoding="utf-8")
+    (qa_dir / "editorial_motion_review_report.md").write_text("\n".join(review_lines) + "\n", encoding="utf-8")
     write_explainer_architecture_plan(qa_dir)
 
 

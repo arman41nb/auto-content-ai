@@ -23,6 +23,7 @@ from app.render.caption_layout import (
     layout_caption_block,
     scene_label_zone,
 )
+from app.render.editorial_motion import compose_motion_background
 from app.render.fonts import load_font
 from app.render.layout import text_size, wrap_text
 from app.render.subtitles import _srt_timestamp
@@ -151,12 +152,14 @@ def render_kinetic_caption_video(
     scene_timings: list[dict[str, Any]],
     total_duration_seconds: float,
     caption_style: str = "pro_yellow_word",
+    motion_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(temp_dir, ignore_errors=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
     segment_count = max(1, int(math.ceil(total_duration_seconds * FPS)))
     layout_samples: list[CaptionLayout] = []
+    motion_by_scene = _motion_by_scene(motion_plan)
     for frame_index in range(segment_count):
         now = frame_index / FPS
         scene_number = _scene_for_time(scene_timings, now)
@@ -174,6 +177,7 @@ def render_kinetic_caption_video(
             handle=handle,
             caption_segment=_active_caption(caption_segments, now),
             caption_style=caption_style,
+            motion_spec=motion_by_scene.get(scene_number),
         )
         if frame_index % max(1, FPS // 5) == 0:
             layout_samples.extend(layouts)
@@ -448,8 +452,9 @@ def _compose_frame(
     handle: str,
     caption_segment: dict[str, Any] | None,
     caption_style: str = "pro_yellow_word",
+    motion_spec: dict[str, Any] | None = None,
 ) -> tuple[Image.Image, list[CaptionLayout]]:
-    canvas = _motion_background(image_path, scene_number, progress, now)
+    canvas = _motion_background(image_path, scene_number, progress, now, motion_spec)
     canvas = Image.alpha_composite(canvas, _gradient_overlay(0.58))
     canvas = _polish_frame(canvas, scene_number)
     draw = ImageDraw.Draw(canvas, "RGBA")
@@ -468,7 +473,15 @@ def _compose_frame(
     return canvas.convert("RGB"), layouts
 
 
-def _motion_background(image_path: Path, scene_number: int, progress: float, now: float) -> Image.Image:
+def _motion_background(
+    image_path: Path,
+    scene_number: int,
+    progress: float,
+    now: float,
+    motion_spec: dict[str, Any] | None = None,
+) -> Image.Image:
+    if isinstance(motion_spec, dict):
+        return compose_motion_background(image_path, motion_spec, progress, REEL_SIZE)
     with Image.open(image_path) as source:
         base = _cover_crop(source.convert("RGB"), REEL_SIZE)
     if scene_number == 1:
@@ -696,3 +709,18 @@ def _motion_profile(scene_number: int) -> str:
         4: "darker_tension_micro_shake",
         5: "slow_pull_hold_question",
     }.get(scene_number, "slow_pan_zoom")
+
+
+def _motion_by_scene(motion_plan: dict[str, Any] | None) -> dict[int, dict[str, Any]]:
+    if not isinstance(motion_plan, dict):
+        return {}
+    scenes = motion_plan.get("scenes", [])
+    if not isinstance(scenes, list):
+        return {}
+    result: dict[int, dict[str, Any]] = {}
+    for scene in scenes:
+        if isinstance(scene, dict):
+            scene_number = int(scene.get("scene_number", 0) or 0)
+            if scene_number > 0:
+                result[scene_number] = scene
+    return result

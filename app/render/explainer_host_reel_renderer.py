@@ -7,10 +7,17 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from app.content.explainer_schemas import ExplainerPlan
+from app.render.editorial_motion import compose_motion_background
+from app.render.editorial_motion_planner import (
+    edit_beats_from_motion_plan,
+    plan_editorial_motion,
+    save_editorial_motion_plan,
+)
 from app.render.fonts import load_font
 from app.render.layout import text_size, wrap_text
 from app.render.native_reel_renderer import FPS, REEL_SIZE, get_ffmpeg_path
@@ -74,7 +81,10 @@ def export_explainer_host_reel(
     scene_durations = _scene_durations(explainer_plan, voiceover_duration_seconds)
     scene_timings = _scene_timings(scene_durations)
     (reel_dir / "scene_timing.json").write_text(json.dumps(scene_timings, ensure_ascii=False, indent=2), encoding="utf-8")
-    edit_beats = _edit_beats(explainer_plan, scene_timings)
+    media_plan = _read_json(output_dir / "media_plan.json")
+    motion_plan = plan_editorial_motion(explainer_plan, media_plan, scene_timings)
+    motion_plan_path = save_editorial_motion_plan(output_dir, motion_plan)
+    edit_beats = edit_beats_from_motion_plan(motion_plan, scene_timings)
     (reel_dir / "edit_beats.json").write_text(json.dumps(edit_beats, ensure_ascii=False, indent=2), encoding="utf-8")
 
     processed_paths: list[Path] = []
@@ -101,6 +111,11 @@ def export_explainer_host_reel(
         "frame_source": "copied_from_final_slides",
         "video_source": "encoded_from_final_slides",
         "final_frames_match_final_slides": True,
+        "editorial_motion_plan": motion_plan,
+        "editorial_motion_plan_path": str(motion_plan_path),
+        "video_clips_used_count": motion_plan.get("video_clips_used_count", 0),
+        "photo_scenes_count": motion_plan.get("photo_scenes_count", 0),
+        "artificial_motion_scenes_count": motion_plan.get("artificial_motion_scenes_count", 0),
     }
 
     ffmpeg_path = get_ffmpeg_path()
@@ -109,7 +124,16 @@ def export_explainer_host_reel(
         (reel_dir / "README_TODO.txt").write_text(warning + "\n", encoding="utf-8")
         return ExplainerHostRenderResult(reel_dir, reel_path, cover_path, frame_paths, False, [warning], base_metadata)
 
-    completed = _render_motion_video(explainer_plan, final_slide_paths, reel_path, temp_dir, ffmpeg_path, handle, scene_durations)
+    completed = _render_motion_video(
+        explainer_plan,
+        final_slide_paths,
+        reel_path,
+        temp_dir,
+        ffmpeg_path,
+        handle,
+        scene_durations,
+        motion_plan,
+    )
     if completed.returncode != 0 or not reel_path.exists():
         warning = "FFmpeg failed while creating explainer reel.mp4. See final_reel/ffmpeg_error.txt."
         (reel_dir / "ffmpeg_error.txt").write_text((completed.stderr or completed.stdout or "Unknown FFmpeg error").strip() + "\n", encoding="utf-8")
@@ -132,6 +156,11 @@ def export_explainer_host_reel(
         "scene_count": len(explainer_plan.scenes),
         "media_variety_count": len({scene.visual_type for scene in explainer_plan.scenes}),
         "motion": "static editorial holds encoded from final composed slide assets",
+        "editorial_motion_plan": motion_plan,
+        "editorial_motion_plan_path": str(motion_plan_path),
+        "video_clips_used_count": motion_plan.get("video_clips_used_count", 0),
+        "photo_scenes_count": motion_plan.get("photo_scenes_count", 0),
+        "artificial_motion_scenes_count": motion_plan.get("artificial_motion_scenes_count", 0),
         "visual_motion_score": 88,
         "scene_cut_on_phrase_boundary_score": 88 if not voiceover_duration_seconds else 92,
         "professional_edit_score": 88,
@@ -170,30 +199,28 @@ def _scene_timings(scene_durations: list[float]) -> list[dict[str, object]]:
     return timings
 
 
-def _edit_beats(plan: ExplainerPlan, scene_timings: list[dict[str, object]]) -> list[dict[str, object]]:
-    return [
-        {
-            "scene_number": int(timing["scene_number"]),
-            "start_seconds": timing["start_seconds"],
-            "end_seconds": timing["end_seconds"],
-            "transition": "clean_cut",
-            "motion_profile": _motion_profile(scene.visual_type),
-            "cut_on_phrase_boundary": False,
-        }
-        for scene, timing in zip(plan.scenes, scene_timings)
-    ]
-
-
-def _render_motion_video(plan: ExplainerPlan, image_paths: list[Path], output_path: Path, temp_dir: Path, ffmpeg_path: str, handle: str, scene_durations: list[float]) -> subprocess.CompletedProcess[str]:
+def _render_motion_video(
+    plan: ExplainerPlan,
+    image_paths: list[Path],
+    output_path: Path,
+    temp_dir: Path,
+    ffmpeg_path: str,
+    handle: str,
+    scene_durations: list[float],
+    motion_plan: dict[str, Any],
+) -> subprocess.CompletedProcess[str]:
+    del handle
     shutil.rmtree(temp_dir, ignore_errors=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
     frame_index = 0
+    motion_by_scene = _motion_by_scene(motion_plan)
     for scene, image_path, duration in zip(plan.scenes, image_paths, scene_durations):
         scene_frames = max(1, int(round(duration * FPS)))
-        with Image.open(image_path) as source:
-            base = _cover_crop(source.convert("RGB"), REEL_SIZE)
+        motion = motion_by_scene.get(scene.scene_number, {})
         for local_frame in range(scene_frames):
-            base.save(temp_dir / f"frame_{frame_index:05d}.jpg", "JPEG", quality=92)
+            progress = local_frame / max(1, scene_frames - 1)
+            frame = compose_motion_background(image_path, motion, progress, REEL_SIZE).convert("RGB")
+            frame.save(temp_dir / f"frame_{frame_index:05d}.jpg", "JPEG", quality=92)
             frame_index += 1
     completed = subprocess.run(
         [ffmpeg_path, "-y", "-framerate", str(FPS), "-i", str(temp_dir / "frame_%05d.jpg"), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path)],
@@ -203,6 +230,19 @@ def _render_motion_video(plan: ExplainerPlan, image_paths: list[Path], output_pa
     )
     shutil.rmtree(temp_dir, ignore_errors=True)
     return completed
+
+
+def _motion_by_scene(motion_plan: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    scenes = motion_plan.get("scenes", [])
+    if not isinstance(scenes, list):
+        return {}
+    result: dict[int, dict[str, Any]] = {}
+    for scene in scenes:
+        if isinstance(scene, dict):
+            scene_number = int(scene.get("scene_number", 0) or 0)
+            if scene_number > 0:
+                result[scene_number] = scene
+    return result
 
 
 def _compose_cover(image_path: Path, plan: ExplainerPlan, handle: str) -> Image.Image:
@@ -309,3 +349,13 @@ def _motion_profile(visual_type: str) -> str:
     if visual_type in {"premium_infographic", "generated_chart"}:
         return "steady_hold_with_slight_push_for_readability"
     return "editorial_final_slide_hold"
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}

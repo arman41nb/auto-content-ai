@@ -207,6 +207,37 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
         for issue in _string_list(native_reel_quality.get("blocking_issues", [])):
             blocking.append(issue)
 
+    editorial_motion_quality = _editorial_motion_quality(metadata)
+    if editorial_motion_quality:
+        editorial_motion_score = int(editorial_motion_quality.get("editorial_motion_score", 0) or 0)
+        obvious_zoom_count = int(editorial_motion_quality.get("obvious_zoom_count", 0) or 0)
+        repeated_motion_pattern_count = int(editorial_motion_quality.get("repeated_motion_pattern_count", 0) or 0)
+        slideshow_motion_risk = str(editorial_motion_quality.get("slideshow_motion_risk", "low"))
+        max_still_scale_delta = float(editorial_motion_quality.get("max_still_scale_delta", 0.0) or 0.0)
+        average_still_scale_delta = float(editorial_motion_quality.get("average_still_scale_delta", 0.0) or 0.0)
+        if not bool(editorial_motion_quality.get("quality_gate_passed", False)):
+            blocking.append("Editorial motion quality gate failed.")
+            score -= 16
+        if obvious_zoom_count > 1:
+            blocking.append(f"Editorial obvious zoom count is too high: {obvious_zoom_count}.")
+            score -= 10
+        if max_still_scale_delta > 0.035:
+            blocking.append(f"Editorial still-image scale delta is above cap: {max_still_scale_delta:.3f}.")
+            score -= 10
+        if average_still_scale_delta > 0.02:
+            blocking.append(f"Editorial average still-image scale delta is above cap: {average_still_scale_delta:.3f}.")
+            score -= 8
+        if repeated_motion_pattern_count > 0:
+            blocking.append(f"Editorial repeated motion pattern count is above 0: {repeated_motion_pattern_count}.")
+            score -= 8
+        if slideshow_motion_risk == "high":
+            blocking.append("Editorial slideshow motion risk is high.")
+            score -= 14
+        if editorial_motion_score < 85:
+            blocking.append(f"Editorial motion score is below threshold: {editorial_motion_score}.")
+            score -= 12
+        warnings.extend(_string_list(editorial_motion_quality.get("warnings", [])))
+
     design = _design_quality_report(output_dir, existing_final, metadata, expected_slide_size)
     warnings.extend(design["amateur_template_warnings"])
     if design["design_score"] < 70:
@@ -237,6 +268,14 @@ def run_post_quality_gate(output_dir: Path, plan: CarouselPlan, metadata: dict[s
             "intentional_overlay_text_present": bool(metadata.get("intentional_overlay_text_present", False)),
             "publish_blocking_image_warnings": publish_blocking_image_warnings,
             "native_reel_quality": native_reel_quality if isinstance(native_reel_quality, dict) else {},
+            "editorial_motion_quality": editorial_motion_quality,
+            "editorial_motion_score": editorial_motion_quality.get("editorial_motion_score", 0),
+            "obvious_zoom_count": editorial_motion_quality.get("obvious_zoom_count", 0),
+            "max_still_scale_delta": editorial_motion_quality.get("max_still_scale_delta", 0),
+            "average_still_scale_delta": editorial_motion_quality.get("average_still_scale_delta", 0),
+            "repeated_motion_pattern_count": editorial_motion_quality.get("repeated_motion_pattern_count", 0),
+            "slideshow_motion_risk": editorial_motion_quality.get("slideshow_motion_risk", ""),
+            "transition_variety_score": editorial_motion_quality.get("transition_variety_score", 0),
             "native_reel_score": native_reel_quality.get("native_reel_score", 0)
             if isinstance(native_reel_quality, dict)
             else 0,
@@ -329,6 +368,12 @@ def write_post_quality_report(output_dir: Path, report: PostQualityReport) -> No
         f"- first_second_hook_score: {report.details.get('first_second_hook_score', 0)}",
         f"- scene_variety_score: {report.details.get('scene_variety_score', 0)}",
         f"- ai_slideshow_risk_score: {report.details.get('ai_slideshow_risk_score', 0)}",
+        f"- editorial_motion_score: {report.details.get('editorial_motion_score', 0)}",
+        f"- obvious_zoom_count: {report.details.get('obvious_zoom_count', 0)}",
+        f"- max_still_scale_delta: {report.details.get('max_still_scale_delta', 0)}",
+        f"- average_still_scale_delta: {report.details.get('average_still_scale_delta', 0)}",
+        f"- repeated_motion_pattern_count: {report.details.get('repeated_motion_pattern_count', 0)}",
+        f"- slideshow_motion_risk: {report.details.get('slideshow_motion_risk', '')}",
         f"- cover_quality_score: {report.details.get('cover_quality_score', 0)}",
         f"- caption_sync_score: {report.details.get('caption_sync_score', 0)}",
         f"- kinetic_caption_score: {report.details.get('kinetic_caption_score', 0)}",
@@ -724,6 +769,8 @@ def _recommended_action(
 ) -> str:
     if not blocking:
         return "post"
+    if any("motion" in issue.lower() or "zoom" in issue.lower() or "slideshow" in issue.lower() for issue in blocking):
+        return "polish_motion"
     if high_artifact_slides or failed_quality_slides:
         return "regenerate_bad_slides"
     if any("design score" in issue.lower() or "reel cover" in issue.lower() or "reel video" in issue.lower() for issue in blocking):
@@ -768,6 +815,18 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item).strip()]
+
+
+def _editorial_motion_quality(metadata: dict[str, Any]) -> dict[str, Any]:
+    direct = metadata.get("editorial_motion_quality", {})
+    if isinstance(direct, dict) and direct:
+        return direct
+    render = metadata.get("explainer_reel_render", {})
+    if isinstance(render, dict):
+        nested = render.get("editorial_motion_quality", {})
+        if isinstance(nested, dict):
+            return nested
+    return {}
 
 
 def _dedupe(values: list[str]) -> list[str]:

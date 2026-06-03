@@ -229,12 +229,13 @@ def _compose_reel_frame(
 ) -> Image.Image:
     source = Image.open(image_path).convert("RGB")
     base = _cover_crop(source, REEL_SIZE)
-    zoom = 1.035 + (0.055 * progress)
+    zoom = 1.012
     zoomed = base.resize((int(REEL_SIZE[0] * zoom), int(REEL_SIZE[1] * zoom)), Image.Resampling.LANCZOS)
     max_x_shift = max(0, zoomed.width - REEL_SIZE[0])
     max_y_shift = max(0, zoomed.height - REEL_SIZE[1])
-    x = -int(max_x_shift * progress) if pan_direction >= 0 else -int(max_x_shift * (1 - progress))
-    y = -int(max_y_shift * (0.25 + 0.18 * progress))
+    drift = -0.5 + progress if pan_direction >= 0 else 0.5 - progress
+    x = max(-max_x_shift, min(0, -max_x_shift // 2 + int(drift * REEL_SIZE[0] * 0.012)))
+    y = -max_y_shift // 2
     canvas = Image.new("RGBA", REEL_SIZE, (0, 0, 0, 255))
     canvas.alpha_composite(zoomed.convert("RGBA"), (x, y))
     canvas = Image.alpha_composite(canvas, Image.new("RGBA", REEL_SIZE, (0, 0, 0, 28)))
